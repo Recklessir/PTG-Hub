@@ -1,0 +1,2133 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+local Camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+if _G.Kraken_Active then _G.Kraken_Active = false task.wait(0.1) end
+_G.Kraken_Active = true
+
+for _, v in CoreGui:GetChildren() do if v.Name == "Kraken" then v:Destroy() end end
+
+-- ── GitHub Bundled Loader (Preprocessed_Bundled.lua) ─────────────────────────
+-- Set this to your RAW GitHub URL (not github.com page URL).
+local BUNDLED_RAW_URL = _G.PTG_BUNDLED_RAW_URL or "https://raw.githubusercontent.com/Recklessir/PTG-Hub/refs/heads/main/Preprocessed_Bundled.lua"
+local AUTO_LOAD_BUNDLED = (_G.PTG_AUTO_LOAD_BUNDLED ~= false) and not (_G and _G.PTG_RUNNING_INSIDE_BUNDLED)
+-- Modes:
+--   "hybrid"       => load bundled features + keep PTG HUB running
+--   "bundled_only" => load bundled features and stop PTG HUB initialization
+local INTEGRATION_MODE = (_G.PTG_INTEGRATION_MODE or "hybrid")
+
+local function loadBundledFromGitHub(rawUrl)
+    if type(rawUrl) ~= "string" or rawUrl == "" or rawUrl:find("USERNAME/REPO/BRANCH", 1, true) then
+        warn("[PTG] Bundled loader skipped: set _G.PTG_BUNDLED_RAW_URL to your raw GitHub URL")
+        return false, "url_not_set"
+    end
+
+    local okGet, source = pcall(function()
+        if syn and syn.request then
+            local res = syn.request({ Url = rawUrl, Method = "GET" })
+            if not res or tonumber(res.StatusCode) ~= 200 then
+                error("http status " .. tostring(res and res.StatusCode))
+            end
+            return res.Body
+        end
+        if http and http.request then
+            local res = http.request({ Url = rawUrl, Method = "GET" })
+            if not res or tonumber(res.StatusCode) ~= 200 then
+                error("http status " .. tostring(res and res.StatusCode))
+            end
+            return res.Body
+        end
+        return game:HttpGet(rawUrl, true)
+    end)
+    if not okGet or type(source) ~= "string" or source == "" then
+        warn("[PTG] Bundled fetch failed:", tostring(source))
+        return false, "fetch_failed"
+    end
+
+    local loader = loadstring or load
+    if type(loader) ~= "function" then
+        warn("[PTG] Bundled loader unavailable (loadstring/load missing)")
+        return false, "no_loader"
+    end
+
+    local chunk, compileErr = loader(source)
+    if not chunk then
+        warn("[PTG] Bundled compile failed:", tostring(compileErr))
+        return false, "compile_failed"
+    end
+
+    local okRun, runErr = pcall(chunk)
+    if not okRun then
+        warn("[PTG] Bundled runtime failed:", tostring(runErr))
+        return false, "runtime_failed"
+    end
+
+    _G.PTG_BUNDLED_LAST_URL = rawUrl
+    return true, "ok"
+end
+
+if AUTO_LOAD_BUNDLED then
+    local okBundled, reasonBundled = loadBundledFromGitHub(BUNDLED_RAW_URL)
+    if okBundled then
+        _G.PTG_BUNDLED_LOADED = true
+        warn("[PTG] Bundled script loaded from GitHub")
+        if INTEGRATION_MODE == "bundled_only" then
+            warn("[PTG] Integration mode is bundled_only; skipping PTG HUB initialization")
+            return
+        end
+    else
+        _G.PTG_BUNDLED_LOADED = false
+        warn("[PTG] Bundled script did not load (" .. tostring(reasonBundled) .. ")")
+    end
+end
+
+-- Expose manual loader in case you want to call it later:
+-- _G.PTG_LoadBundledFromGitHub("https://raw.githubusercontent.com/.../Preprocessed_Bundled.lua")
+_G.PTG_LoadBundledFromGitHub = loadBundledFromGitHub
+
+local cfg = {
+    ESP = true, Box = true, Name = true, Health = true, Dist = true,
+    MobESP = true,
+    Fly = false, Noclip = false, TP = false, LootLoop = false,
+    InfiniteStamina = false,
+    Accent = Color3.fromRGB(0, 255, 100), BG = Color3.fromRGB(8, 12, 10), Text = Color3.fromRGB(200, 255, 220),
+    CFspeed = 100,
+    ESPMaxDist = 500,
+    ShowPerfBar = true,
+    FPSBoost = false,
+    -- Placeholder toggle states
+    FeatureAlpha   = false,
+    FeatureBeta    = false,
+    FeatureGamma   = false,
+    FeatureDelta   = false,
+    FeatureEpsilon = false,
+    FeatureZeta    = false,
+    FeatureEta     = false,
+}
+
+-- ── Keybind config (changeable at runtime) ───────────────────────────────────
+local binds = {
+    Menu    = Enum.KeyCode.RightShift,
+    Fly     = Enum.KeyCode.T,
+    Noclip  = Enum.KeyCode.N,
+    TP      = Enum.KeyCode.G,
+}
+
+-- Restore saved binds
+if _G.Kraken_Binds then
+    for k, v in pairs(_G.Kraken_Binds) do
+        if binds[k] then binds[k] = v end
+    end
+end
+_G.Kraken_Binds = binds
+
+local DEFAULT_BINDS = {
+    Menu   = Enum.KeyCode.RightShift,
+    Fly    = Enum.KeyCode.T,
+    Noclip = Enum.KeyCode.N,
+    TP     = Enum.KeyCode.G,
+}
+
+-- ── Feature (inline) keybinds ────────────────────────────────────────────────
+local featureBinds = {}
+
+local listeningBind     = nil
+local listeningFeature  = nil
+local bindButtons       = {}
+local bindDisplayLabels = {}
+
+local function keyName(kc)
+    local s = tostring(kc)
+    return s:match("KeyCode%.(.+)") or s
+end
+
+-- ── Config Save/Load ──────────────────────────────────────────────────────────
+local CFG_FOLDER  = "Kraken"
+local AUTO_FILE   = "Kraken/kraken_autoload.txt"
+
+local SAVEABLE_KEYS = {
+    "ESP", "MobESP", "Fly", "Noclip", "TP", "LootLoop",
+    "InfiniteStamina", "FPSBoost", "CFspeed", "ESPMaxDist",
+    "ShowPerfBar",
+}
+local SAVEABLE_BINDS = { "Menu", "Fly", "Noclip", "TP" }
+
+local cfgCurrentName = "default"
+
+local function ensureFolder()
+    if not isfolder(CFG_FOLDER) then makefolder(CFG_FOLDER) end
+end
+
+local function cfgPath(name)
+    return CFG_FOLDER .. "/" .. name .. ".json"
+end
+
+local function serializeCfg()
+    local data = { cfg = {}, binds = {} }
+    for _, k in ipairs(SAVEABLE_KEYS) do
+        local v = cfg[k]
+        if type(v) == "boolean" or type(v) == "number" then
+            data.cfg[k] = v
+        end
+    end
+    for _, k in ipairs(SAVEABLE_BINDS) do
+        data.binds[k] = tostring(binds[k])
+    end
+    return HttpService:JSONEncode(data)
+end
+
+local function deserializeCfg(raw)
+    local decoded
+    local ok = pcall(function() decoded = HttpService:JSONDecode(raw) end)
+    if not ok or not decoded then return false end
+    if decoded.cfg then
+        for _, k in ipairs(SAVEABLE_KEYS) do
+            if decoded.cfg[k] ~= nil then cfg[k] = decoded.cfg[k] end
+        end
+    end
+    if decoded.binds then
+        for _, k in ipairs(SAVEABLE_BINDS) do
+            local rb = decoded.binds[k]
+            if rb then
+                local kc = Enum.KeyCode[rb:match("KeyCode%.(.+)") or rb]
+                if kc then binds[k] = kc end
+            end
+        end
+    end
+    return true
+end
+
+local function saveConfig(name)
+    ensureFolder()
+    local ok, err = pcall(writefile, cfgPath(name), serializeCfg())
+    if not ok then warn("Kraken: save failed —", err) end
+    return ok
+end
+
+local function loadConfig(name)
+    ensureFolder()
+    local path = cfgPath(name)
+    if not isfile(path) then return false, "not found" end
+    local ok, raw = pcall(readfile, path)
+    if not ok then return false, "read error" end
+    local parsed = deserializeCfg(raw)
+    return parsed, parsed and "ok" or "parse error"
+end
+
+local function deleteConfig(name)
+    ensureFolder()
+    local path = cfgPath(name)
+    if not isfile(path) then return false end
+    local ok = pcall(delfile, path)
+    return ok
+end
+
+local function listConfigs()
+    ensureFolder()
+    local files = {}
+    local ok, result = pcall(listfiles, CFG_FOLDER)
+    if not ok then return files end
+    for _, f in ipairs(result) do
+        local name = f:match("([^/\\]+)%.json$")
+        if name then table.insert(files, name) end
+    end
+    return files
+end
+
+local function getAutoLoad()
+    if not isfile(AUTO_FILE) then return nil end
+    local ok, raw = pcall(readfile, AUTO_FILE)
+    return (ok and raw ~= "") and raw or nil
+end
+
+local function setAutoLoad(name)
+    ensureFolder()
+    pcall(writefile, AUTO_FILE, name or "")
+end
+
+local function clearAutoLoad()
+    if isfile(AUTO_FILE) then pcall(delfile, AUTO_FILE) end
+end
+
+-- ── Fly ──────────────────────────────────────────────────────────────────────
+local flyActive = false
+local flyConn_kDown, flyConn_kUp
+local BG_fly, BV_fly
+local ctrl  = {F=0, B=0, L=0, R=0, Q=0, E=0}
+local lctrl = {F=0, B=0, L=0, R=0, Q=0, E=0}
+
+local function resetCtrl()
+    for k in pairs(ctrl)  do ctrl[k]  = 0 end
+    for k in pairs(lctrl) do lctrl[k] = 0 end
+end
+
+local function NOFLY()
+    flyActive = false
+    if flyConn_kDown then flyConn_kDown:Disconnect() flyConn_kDown = nil end
+    if flyConn_kUp   then flyConn_kUp:Disconnect()   flyConn_kUp   = nil end
+    local bg = BG_fly
+    local bv = BV_fly
+    BG_fly, BV_fly = nil, nil
+    if bg and bg.Parent then pcall(function() bg:Destroy() end) end
+    if bv and bv.Parent then pcall(function() bv:Destroy() end) end
+    resetCtrl()
+    pcall(function()
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then hum.PlatformStand = false end
+        end
+        Camera.CameraType = Enum.CameraType.Custom
+    end)
+end
+
+local function FLY()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum  = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not (hum and root) then return end
+    if flyActive then
+        flyActive = false
+        if flyConn_kDown then flyConn_kDown:Disconnect() flyConn_kDown = nil end
+        if flyConn_kUp   then flyConn_kUp:Disconnect()   flyConn_kUp   = nil end
+        local oldBG = BG_fly; local oldBV = BV_fly
+        BG_fly, BV_fly = nil, nil
+        if oldBG and oldBG.Parent then pcall(function() oldBG:Destroy() end) end
+        if oldBV and oldBV.Parent then pcall(function() oldBV:Destroy() end) end
+        resetCtrl()
+    end
+    flyActive = true
+    resetCtrl()
+    BG_fly = Instance.new("BodyGyro", root)
+    BV_fly = Instance.new("BodyVelocity", root)
+    BG_fly.P          = 9e4
+    BG_fly.MaxTorque  = Vector3.new(9e9, 9e9, 9e9)
+    BG_fly.CFrame     = root.CFrame
+    BV_fly.MaxForce   = Vector3.new(9e9, 9e9, 9e9)
+    BV_fly.Velocity   = Vector3.new()
+    local sessionBG = BG_fly
+    local sessionBV = BV_fly
+    task.spawn(function()
+        while flyActive and _G.Kraken_Active do
+            if BG_fly ~= sessionBG or BV_fly ~= sessionBV then break end
+            if not sessionBG.Parent or not sessionBV.Parent then break end
+            hum.PlatformStand = true
+            local cf = Camera.CFrame
+            local dx = ctrl.L  + ctrl.R
+            local dz = ctrl.F  + ctrl.B
+            local dy = ctrl.Q  + ctrl.E
+            if dx ~= 0 or dz ~= 0 or dy ~= 0 then
+                local fwd   = cf.LookVector  * dz
+                local right = cf.RightVector * dx
+                local up    = Vector3.new(0, dy, 0)
+                sessionBV.Velocity = (fwd + right + up) * cfg.CFspeed
+            else
+                sessionBV.Velocity = sessionBV.Velocity * 0.85
+                if sessionBV.Velocity.Magnitude < 0.5 then sessionBV.Velocity = Vector3.new() end
+            end
+            sessionBG.CFrame = cf
+            task.wait()
+        end
+        pcall(function()
+            if sessionBG.Parent then sessionBG:Destroy() end
+            if sessionBV.Parent then sessionBV:Destroy() end
+            if hum and hum.Parent then hum.PlatformStand = false end
+        end)
+    end)
+    local keyMap = {
+        [Enum.KeyCode.W] = {slot="F",  val= 1},
+        [Enum.KeyCode.S] = {slot="B",  val=-1},
+        [Enum.KeyCode.A] = {slot="L",  val=-1},
+        [Enum.KeyCode.D] = {slot="R",  val= 1},
+        [Enum.KeyCode.E] = {slot="Q",  val= 1},
+        [Enum.KeyCode.Q] = {slot="E",  val=-1},
+    }
+    flyConn_kDown = UserInputService.InputBegan:Connect(function(i, p)
+        if p then return end
+        local m = keyMap[i.KeyCode]
+        if m then ctrl[m.slot] = m.val end
+    end)
+    flyConn_kUp = UserInputService.InputEnded:Connect(function(i, p)
+        if p then return end
+        local m = keyMap[i.KeyCode]
+        if m then ctrl[m.slot] = 0 end
+    end)
+end
+
+-- ── Noclip ───────────────────────────────────────────────────────────────────
+local noclipConn       = nil
+local noclipDescConn   = nil
+local noclipSnapshot   = {}
+local noclipApplied    = {}
+
+local function noclipApplyPart(part)
+    if not part:IsA("BasePart") then return end
+    if noclipSnapshot[part] == nil then
+        noclipSnapshot[part] = part.CanCollide
+    end
+    part.CanCollide    = false
+    noclipApplied[part] = true
+end
+
+local function noclipApplyChar(char)
+    for _, d in ipairs(char:GetDescendants()) do noclipApplyPart(d) end
+end
+
+local function noclipRestoreChar(char)
+    if not char then return end
+    for _, d in ipairs(char:GetDescendants()) do
+        if d:IsA("BasePart") then
+            local orig = noclipSnapshot[d]
+            d.CanCollide = (orig ~= nil) and orig or true
+        end
+    end
+    noclipSnapshot = {}
+    noclipApplied  = {}
+end
+
+local function startNoclip()
+    local char = LocalPlayer.Character
+    if not char then return end
+    noclipSnapshot = {}
+    noclipApplied  = {}
+    noclipApplyChar(char)
+    if noclipDescConn then noclipDescConn:Disconnect() end
+    noclipDescConn = char.DescendantAdded:Connect(function(d)
+        if cfg.Noclip and _G.Kraken_Active then noclipApplyPart(d) end
+    end)
+    if noclipConn then noclipConn:Disconnect() end
+    noclipConn = RunService.Stepped:Connect(function()
+        if not cfg.Noclip or not _G.Kraken_Active then return end
+        local c = LocalPlayer.Character
+        if not c then return end
+        for _, d in ipairs(c:GetDescendants()) do
+            if d:IsA("BasePart") and d.CanCollide then
+                if noclipSnapshot[d] == nil then noclipSnapshot[d] = true end
+                d.CanCollide    = false
+                noclipApplied[d] = true
+            end
+        end
+    end)
+end
+
+local function stopNoclip()
+    if noclipConn     then noclipConn:Disconnect()     noclipConn     = nil end
+    if noclipDescConn then noclipDescConn:Disconnect() noclipDescConn = nil end
+    noclipRestoreChar(LocalPlayer.Character)
+end
+
+function SetNoclip(v)
+    cfg.Noclip = v
+    if v then startNoclip() else stopNoclip() end
+end
+
+-- ── FPS Boost ────────────────────────────────────────────────────────────────
+local fpsBoostActive = false
+local originalState = {}
+local fpsBoostDescConn = nil
+
+local function stripTerrain()
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if not terrain then return end
+    if originalState[terrain] == nil then
+        originalState[terrain] = {
+            type              = "Terrain",
+            WaterColor        = terrain.WaterColor,
+            WaterReflectance  = terrain.WaterReflectance,
+            WaterTransparency = terrain.WaterTransparency,
+            WaterWaveSize     = terrain.WaterWaveSize,
+            WaterWaveSpeed    = terrain.WaterWaveSpeed,
+        }
+    end
+    terrain.WaterColor        = Color3.fromRGB(0, 100, 255)
+    terrain.WaterReflectance  = 0
+    terrain.WaterTransparency = 0
+    terrain.WaterWaveSize     = 0
+    terrain.WaterWaveSpeed    = 0
+end
+
+local function restoreTerrain()
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if not terrain then return end
+    local saved = originalState[terrain]
+    if not saved then return end
+    pcall(function()
+        terrain.WaterColor        = saved.WaterColor
+        terrain.WaterReflectance  = saved.WaterReflectance
+        terrain.WaterTransparency = saved.WaterTransparency
+        terrain.WaterWaveSize     = saved.WaterWaveSize
+        terrain.WaterWaveSpeed    = saved.WaterWaveSpeed
+    end)
+    originalState[terrain] = nil
+end
+
+local function stripPart(obj)
+    if obj:IsA("BasePart") then
+        if originalState[obj] == nil then
+            originalState[obj] = {
+                type     = "BasePart",
+                Material = obj.Material,
+                Color    = obj.Color,
+            }
+        end
+        obj.Material = Enum.Material.SmoothPlastic
+
+    elseif obj:IsA("SurfaceAppearance") then
+        if originalState[obj] == nil then
+            originalState[obj] = {
+                type         = "SurfaceAppearance",
+                ColorMap     = obj.ColorMap,
+                NormalMap    = obj.NormalMap,
+                RoughnessMap = obj.RoughnessMap,
+                MetalnessMap = obj.MetalnessMap,
+            }
+        end
+        obj.ColorMap     = ""
+        obj.NormalMap    = ""
+        obj.RoughnessMap = ""
+        obj.MetalnessMap = ""
+
+    elseif obj:IsA("Texture") or obj:IsA("Decal") then
+        if originalState[obj] == nil then
+            originalState[obj] = {
+                type         = "TextureDecal",
+                Texture      = obj.Texture,
+                Transparency = obj.Transparency,
+            }
+        end
+        obj.Texture      = ""
+        obj.Transparency = 1
+
+    elseif obj:IsA("SpecialMesh") then
+        if obj.TextureId ~= "" and originalState[obj] == nil then
+            originalState[obj] = {
+                type      = "SpecialMesh",
+                TextureId = obj.TextureId,
+            }
+            obj.TextureId = ""
+        end
+
+    elseif obj:IsA("BloomEffect") or obj:IsA("BlurEffect") or obj:IsA("SunRaysEffect")
+        or obj:IsA("ColorCorrectionEffect") or obj:IsA("DepthOfFieldEffect") then
+        if originalState[obj] == nil then
+            originalState[obj] = { type = "Effect", Enabled = obj.Enabled }
+        end
+        obj.Enabled = false
+    end
+end
+
+local function restorePart(obj, saved)
+    pcall(function()
+        if not obj or not obj.Parent then return end
+        local t = saved.type
+        if t == "BasePart" then
+            obj.Material = saved.Material
+            obj.Color    = saved.Color
+        elseif t == "SurfaceAppearance" then
+            obj.ColorMap     = saved.ColorMap
+            obj.NormalMap    = saved.NormalMap
+            obj.RoughnessMap = saved.RoughnessMap
+            obj.MetalnessMap = saved.MetalnessMap
+        elseif t == "TextureDecal" then
+            obj.Texture      = saved.Texture
+            obj.Transparency = saved.Transparency
+        elseif t == "SpecialMesh" then
+            obj.TextureId = saved.TextureId
+        elseif t == "Effect" then
+            obj.Enabled = saved.Enabled
+        end
+    end)
+end
+
+local function applyFPSBoost()
+    if fpsBoostActive then return end
+    fpsBoostActive = true
+    stripTerrain()
+    for _, obj in pairs(workspace:GetDescendants()) do stripPart(obj) end
+    for _, obj in pairs(game:GetService("Lighting"):GetChildren()) do stripPart(obj) end
+    fpsBoostDescConn = workspace.DescendantAdded:Connect(function(obj)
+        if fpsBoostActive then
+            task.defer(function()
+                if obj and obj.Parent and fpsBoostActive then stripPart(obj) end
+            end)
+        end
+    end)
+end
+
+local function removeFPSBoost()
+    if not fpsBoostActive then return end
+    fpsBoostActive = false
+    restoreTerrain()
+    if fpsBoostDescConn then fpsBoostDescConn:Disconnect() fpsBoostDescConn = nil end
+    for obj, saved in pairs(originalState) do restorePart(obj, saved) end
+    originalState = {}
+end
+
+function SetFPSBoost(v)
+    cfg.FPSBoost = v
+    if v then applyFPSBoost() else removeFPSBoost() end
+end
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    noclipSnapshot = {}
+    noclipApplied  = {}
+    if cfg.Noclip then
+        task.wait(0.5)
+        if cfg.Noclip then startNoclip() end
+    end
+    if cfg.InfiniteStamina then task.wait(1) StartStamina() end
+end)
+
+LocalPlayer.CharacterRemoving:Connect(function()
+    if flyActive then
+        flyActive = false
+        cfg.Fly = false
+        resetCtrl()
+    end
+    if noclipConn     then noclipConn:Disconnect()     noclipConn     = nil end
+    if noclipDescConn then noclipDescConn:Disconnect() noclipDescConn = nil end
+    noclipSnapshot = {}
+    noclipApplied  = {}
+end)
+
+function SetFly(v)
+    cfg.Fly = v
+    if v then FLY() else NOFLY() end
+end
+
+-- ── GUI ──────────────────────────────────────────────────────────────────────
+local ScreenGui = Instance.new("ScreenGui", CoreGui)
+ScreenGui.Name = "Kraken"
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.ResetOnSpawn = false
+
+local RESIZE_MIN_W = 220
+local RESIZE_MIN_H = 160
+local RESIZE_MAX_W = 600
+local RESIZE_MAX_H = 700
+
+local Frame = Instance.new("Frame", ScreenGui)
+Frame.Size = UDim2.new(0, 300, 0, 260)
+Frame.Position = UDim2.new(0.35, 0, 0.25, 0)
+Frame.BackgroundColor3 = cfg.BG
+Frame.Active = true
+Frame.Draggable = true
+Frame.ClipsDescendants = true
+Instance.new("UICorner", Frame).CornerRadius = UDim.new(0, 10)
+
+local OuterStroke = Instance.new("UIStroke", Frame)
+OuterStroke.Color = Color3.fromRGB(30, 55, 40)
+OuterStroke.Thickness = 1
+
+local Header = Instance.new("Frame", Frame)
+Header.Size = UDim2.new(1, 0, 0, 40)
+Header.BackgroundColor3 = Color3.fromRGB(12, 20, 15)
+Header.BorderSizePixel = 0
+Instance.new("UICorner", Header).CornerRadius = UDim.new(0, 10)
+
+local HeaderPatch = Instance.new("Frame", Header)
+HeaderPatch.Size = UDim2.new(1, 0, 0.5, 0)
+HeaderPatch.Position = UDim2.new(0, 0, 0.5, 0)
+HeaderPatch.BackgroundColor3 = Color3.fromRGB(12, 20, 15)
+HeaderPatch.BorderSizePixel = 0
+
+local LogoDot = Instance.new("Frame", Header)
+LogoDot.Size = UDim2.new(0, 8, 0, 8)
+LogoDot.Position = UDim2.new(0, 14, 0.5, -4)
+LogoDot.BackgroundColor3 = cfg.Accent
+LogoDot.BorderSizePixel = 0
+Instance.new("UICorner", LogoDot).CornerRadius = UDim.new(1, 0)
+
+local TitleLabel = Instance.new("TextLabel", Header)
+TitleLabel.Size = UDim2.new(1, -30, 1, 0)
+TitleLabel.Position = UDim2.new(0, 28, 0, 0)
+TitleLabel.Text = "Pierce The Glorp  ·  CG  ·  V1.0"
+TitleLabel.Font = Enum.Font.Code
+TitleLabel.TextSize = 13
+TitleLabel.TextColor3 = cfg.Text
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.TextTransparency = 0.15
+
+-- ── Tab Bar ───────────────────────────────────────────────────────────────────
+local TabBar = Instance.new("Frame", Frame)
+TabBar.Size = UDim2.new(1, 0, 0, 28)
+TabBar.Position = UDim2.new(0, 0, 0, 40)
+TabBar.BackgroundColor3 = Color3.fromRGB(10, 18, 13)
+TabBar.BorderSizePixel = 0
+
+local TabBarLayout = Instance.new("UIListLayout", TabBar)
+TabBarLayout.FillDirection = Enum.FillDirection.Horizontal
+TabBarLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local function makeTab(label, order)
+    local btn = Instance.new("TextButton", TabBar)
+    btn.Size = UDim2.new(0.5, 0, 1, 0)
+    btn.BackgroundTransparency = 1
+    btn.Font = Enum.Font.Code
+    btn.TextSize = 11
+    btn.TextColor3 = cfg.Text
+    btn.TextTransparency = 0.5
+    btn.Text = label
+    btn.LayoutOrder = order
+    btn.AutoButtonColor = false
+    local underline = Instance.new("Frame", btn)
+    underline.Size = UDim2.new(0.55, 0, 0, 2)
+    underline.Position = UDim2.new(0.225, 0, 1, -2)
+    underline.BackgroundColor3 = cfg.Accent
+    underline.BackgroundTransparency = 1
+    underline.BorderSizePixel = 0
+    Instance.new("UICorner", underline).CornerRadius = UDim.new(1, 0)
+    return btn, underline
+end
+
+local TabToggles, TabTogglesLine = makeTab("TOGGLES", 1)
+local TabConfig,  TabConfigLine  = makeTab("CONFIG",  2)
+
+local Separator = Instance.new("Frame", Frame)
+Separator.Size = UDim2.new(1, 0, 0, 1)
+Separator.Position = UDim2.new(0, 0, 0, 68)
+Separator.BackgroundColor3 = Color3.fromRGB(25, 50, 35)
+Separator.BorderSizePixel = 0
+
+-- ── Toggles Scroll ────────────────────────────────────────────────────────────
+local Scroll = Instance.new("ScrollingFrame", Frame)
+Scroll.Size = UDim2.new(1, 0, 1, -100)
+Scroll.Position = UDim2.new(0, 0, 0, 69)
+Scroll.BackgroundTransparency = 1
+Scroll.ScrollBarThickness = 3
+Scroll.ScrollBarImageColor3 = cfg.Accent
+Scroll.ScrollBarImageTransparency = 0.5
+Scroll.BorderSizePixel = 0
+Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+
+local Layout = Instance.new("UIListLayout", Scroll)
+Layout.Padding = UDim.new(0, 0)
+Layout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local Padding = Instance.new("UIPadding", Scroll)
+Padding.PaddingLeft   = UDim.new(0, 12)
+Padding.PaddingRight  = UDim.new(0, 12)
+Padding.PaddingTop    = UDim.new(0, 8)
+Padding.PaddingBottom = UDim.new(0, 8)
+
+Layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    Scroll.CanvasSize = UDim2.new(0, 0, 0, Layout.AbsoluteContentSize.Y + 16)
+end)
+
+-- ── Config Scroll ─────────────────────────────────────────────────────────────
+local ConfigScroll = Instance.new("ScrollingFrame", Frame)
+ConfigScroll.Size = UDim2.new(1, 0, 1, -100)
+ConfigScroll.Position = UDim2.new(0, 0, 0, 69)
+ConfigScroll.BackgroundTransparency = 1
+ConfigScroll.ScrollBarThickness = 3
+ConfigScroll.ScrollBarImageColor3 = cfg.Accent
+ConfigScroll.ScrollBarImageTransparency = 0.5
+ConfigScroll.BorderSizePixel = 0
+ConfigScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+ConfigScroll.Visible = false
+
+local CfgLayout = Instance.new("UIListLayout", ConfigScroll)
+CfgLayout.Padding = UDim.new(0, 0)
+CfgLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local CfgPad = Instance.new("UIPadding", ConfigScroll)
+CfgPad.PaddingLeft   = UDim.new(0, 12)
+CfgPad.PaddingRight  = UDim.new(0, 12)
+CfgPad.PaddingTop    = UDim.new(0, 8)
+CfgPad.PaddingBottom = UDim.new(0, 8)
+
+CfgLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    ConfigScroll.CanvasSize = UDim2.new(0, 0, 0, CfgLayout.AbsoluteContentSize.Y + 16)
+end)
+
+-- ── Status Bar ────────────────────────────────────────────────────────────────
+local StatusBar = Instance.new("Frame", Frame)
+StatusBar.Size = UDim2.new(1, 0, 0, 28)
+StatusBar.Position = UDim2.new(0, 0, 1, -28)
+StatusBar.BackgroundColor3 = Color3.fromRGB(10, 18, 13)
+StatusBar.BorderSizePixel = 0
+
+local StatusPatch = Instance.new("Frame", StatusBar)
+StatusPatch.Size = UDim2.new(1, 0, 0.5, 0)
+StatusPatch.BackgroundColor3 = Color3.fromRGB(10, 18, 13)
+StatusPatch.BorderSizePixel = 0
+
+Instance.new("UICorner", StatusBar).CornerRadius = UDim.new(0, 10)
+
+local TPStatusLabel = Instance.new("TextLabel", StatusBar)
+TPStatusLabel.Size = UDim2.new(1, -16, 1, 0)
+TPStatusLabel.Position = UDim2.new(0, 8, 0, 0)
+TPStatusLabel.Text = ""
+TPStatusLabel.Font = Enum.Font.Code
+TPStatusLabel.TextSize = 12
+TPStatusLabel.TextColor3 = cfg.Accent
+TPStatusLabel.TextTransparency = 0.2
+TPStatusLabel.BackgroundTransparency = 1
+TPStatusLabel.TextXAlignment = Enum.TextXAlignment.Center
+
+local HintLabel = Instance.new("TextLabel", StatusBar)
+HintLabel.Size = UDim2.new(1, -8, 1, 0)
+HintLabel.Position = UDim2.new(0, 8, 0, 0)
+HintLabel.Text = "RShift  ·  toggle menu"
+HintLabel.Font = Enum.Font.Code
+HintLabel.TextSize = 11
+HintLabel.TextColor3 = Color3.fromRGB(100, 160, 120)
+HintLabel.TextTransparency = 0.5
+HintLabel.BackgroundTransparency = 1
+HintLabel.TextXAlignment = Enum.TextXAlignment.Center
+
+-- ── Resize Handle ─────────────────────────────────────────────────────────────
+local ResizeHandle = Instance.new("TextButton", Frame)
+ResizeHandle.Size = UDim2.new(0, 18, 0, 18)
+ResizeHandle.Position = UDim2.new(1, -18, 1, -18)
+ResizeHandle.BackgroundTransparency = 1
+ResizeHandle.Text = ""
+ResizeHandle.ZIndex = 10
+ResizeHandle.AutoButtonColor = false
+
+local function makeDot(parent, ox, oy)
+    local d = Instance.new("Frame", parent)
+    d.Size = UDim2.new(0, 2, 0, 2)
+    d.Position = UDim2.new(0, ox, 0, oy)
+    d.BackgroundColor3 = cfg.Accent
+    d.BackgroundTransparency = 0.5
+    d.BorderSizePixel = 0
+    Instance.new("UICorner", d).CornerRadius = UDim.new(1, 0)
+end
+for row = 0, 2 do for col = 0, 2 do makeDot(ResizeHandle, 2 + col * 5, 2 + row * 5) end end
+
+local resizing = false
+local resizeStartMouse = Vector2.new()
+local resizeStartSize  = Vector2.new()
+
+ResizeHandle.MouseEnter:Connect(function()
+    for _, d in ResizeHandle:GetChildren() do
+        if d:IsA("Frame") then TweenService:Create(d, TweenInfo.new(0.12), {BackgroundTransparency = 0}):Play() end
+    end
+end)
+ResizeHandle.MouseLeave:Connect(function()
+    if not resizing then
+        for _, d in ResizeHandle:GetChildren() do
+            if d:IsA("Frame") then TweenService:Create(d, TweenInfo.new(0.12), {BackgroundTransparency = 0.5}):Play() end
+        end
+    end
+end)
+ResizeHandle.MouseButton1Down:Connect(function()
+    resizing = true
+    Frame.Draggable = false
+    resizeStartMouse = UserInputService:GetMouseLocation()
+    resizeStartSize  = Vector2.new(Frame.AbsoluteSize.X, Frame.AbsoluteSize.Y)
+end)
+UserInputService.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 and resizing then
+        resizing = false
+        Frame.Draggable = true
+        for _, d in ResizeHandle:GetChildren() do
+            if d:IsA("Frame") then TweenService:Create(d, TweenInfo.new(0.12), {BackgroundTransparency = 0.5}):Play() end
+        end
+    end
+end)
+RunService.RenderStepped:Connect(function()
+    if not resizing then return end
+    local mouse = UserInputService:GetMouseLocation()
+    local delta = mouse - resizeStartMouse
+    local newW  = math.clamp(resizeStartSize.X + delta.X, RESIZE_MIN_W, RESIZE_MAX_W)
+    local newH  = math.clamp(resizeStartSize.Y + delta.Y, RESIZE_MIN_H, RESIZE_MAX_H)
+    Frame.Size  = UDim2.new(0, newW, 0, newH)
+end)
+
+-- ── Notifications ─────────────────────────────────────────────────────────────
+local NotifContainer = Instance.new("Frame", ScreenGui)
+NotifContainer.Size = UDim2.new(0, 240, 0, 300)
+NotifContainer.Position = UDim2.new(0, 14, 1, -(14 + 34 + 10))
+NotifContainer.AnchorPoint = Vector2.new(0, 1)
+NotifContainer.BackgroundTransparency = 1
+NotifContainer.ClipsDescendants = false
+NotifContainer.ZIndex = 100
+
+local NotifLayout = Instance.new("UIListLayout", NotifContainer)
+NotifLayout.Padding = UDim.new(0, 6)
+NotifLayout.SortOrder = Enum.SortOrder.LayoutOrder
+NotifLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
+NotifLayout.FillDirection = Enum.FillDirection.Vertical
+NotifLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+
+-- ── Perf Bar ──────────────────────────────────────────────────────────────────
+local perfCfg = {
+    Width=300, Height=34, PosX=14, PosY=14, TextSize=12,
+    ShowFPS=true, ShowPing=true, UpdateRate=0.5,
+    FPSWarn=50, FPSBad=30, PingWarn=80, PingBad=150,
+    LabelFPS="FPS", LabelPing="ms",
+}
+
+local PerfFrame = Instance.new("Frame", ScreenGui)
+PerfFrame.Name        = "KrakenPerf"
+PerfFrame.Size        = UDim2.new(0, perfCfg.Width, 0, perfCfg.Height)
+PerfFrame.Position    = UDim2.new(0, perfCfg.PosX, 1, -perfCfg.PosY)
+PerfFrame.AnchorPoint = Vector2.new(0, 1)
+PerfFrame.BackgroundColor3 = cfg.BG
+PerfFrame.BorderSizePixel  = 0
+PerfFrame.Visible = cfg.ShowPerfBar
+Instance.new("UICorner", PerfFrame).CornerRadius = UDim.new(0, 8)
+
+local PerfStroke = Instance.new("UIStroke", PerfFrame)
+PerfStroke.Color     = Color3.fromRGB(30, 55, 40)
+PerfStroke.Thickness = 1
+
+local PerfDot = Instance.new("Frame", PerfFrame)
+PerfDot.Size             = UDim2.new(0, 6, 0, 6)
+PerfDot.Position         = UDim2.new(0, 8, 0.5, -3)
+PerfDot.BackgroundColor3 = cfg.Accent
+PerfDot.BorderSizePixel  = 0
+Instance.new("UICorner", PerfDot).CornerRadius = UDim.new(1, 0)
+
+local FPSLabel = Instance.new("TextLabel", PerfFrame)
+FPSLabel.Size               = UDim2.new(0.33, -14, 1, 0)
+FPSLabel.Position           = UDim2.new(0, 20, 0, 0)
+FPSLabel.Text               = "-- " .. perfCfg.LabelFPS
+FPSLabel.Font               = Enum.Font.Code
+FPSLabel.TextSize           = perfCfg.TextSize
+FPSLabel.TextColor3         = cfg.Accent
+FPSLabel.BackgroundTransparency = 1
+FPSLabel.TextXAlignment     = Enum.TextXAlignment.Left
+FPSLabel.Visible            = perfCfg.ShowFPS
+
+local PerfDivider = Instance.new("Frame", PerfFrame)
+PerfDivider.Size             = UDim2.new(0, 1, 0, 18)
+PerfDivider.Position         = UDim2.new(0.33, 0, 0.5, -9)
+PerfDivider.BackgroundColor3 = Color3.fromRGB(25, 50, 35)
+PerfDivider.BorderSizePixel  = 0
+PerfDivider.Visible          = perfCfg.ShowFPS and perfCfg.ShowPing
+
+local PerfDivider2 = Instance.new("Frame", PerfFrame)
+PerfDivider2.Size             = UDim2.new(0, 1, 0, 18)
+PerfDivider2.Position         = UDim2.new(0.66, 0, 0.5, -9)
+PerfDivider2.BackgroundColor3 = Color3.fromRGB(25, 50, 35)
+PerfDivider2.BorderSizePixel  = 0
+
+local CustomLabel = Instance.new("TextLabel", PerfFrame)
+CustomLabel.Size               = UDim2.new(0.33, -8, 1, 0)
+CustomLabel.Position           = UDim2.new(0.66, 4, 0, 0)
+CustomLabel.Text               = "PTG Hub V1.0"
+CustomLabel.Font               = Enum.Font.Code
+CustomLabel.TextSize           = perfCfg.TextSize
+CustomLabel.TextColor3         = cfg.Accent
+CustomLabel.BackgroundTransparency = 1
+CustomLabel.TextXAlignment     = Enum.TextXAlignment.Center
+
+local PingLabel = Instance.new("TextLabel", PerfFrame)
+PingLabel.Size     = UDim2.new(0.33, -32, 1, 0)
+PingLabel.Position = UDim2.new(0.33, 16, 0, 0)
+PingLabel.Text               = "-- " .. perfCfg.LabelPing
+PingLabel.Font               = Enum.Font.Code
+PingLabel.TextSize           = perfCfg.TextSize
+PingLabel.TextColor3         = cfg.Accent
+PingLabel.BackgroundTransparency = 1
+PingLabel.TextXAlignment     = Enum.TextXAlignment.Center
+PingLabel.Visible            = perfCfg.ShowPing
+
+local function perfColor(val, warnAt, badAt, higherIsBad)
+    if higherIsBad then
+        if val >= badAt  then return Color3.fromRGB(255, 70, 70)  end
+        if val >= warnAt then return Color3.fromRGB(255, 200, 50) end
+    else
+        if val <= badAt  then return Color3.fromRGB(255, 70, 70)  end
+        if val <= warnAt then return Color3.fromRGB(255, 200, 50) end
+    end
+    return cfg.Accent
+end
+
+local StatsService   = game:GetService("Stats")
+local lastPerfUpdate = 0
+local frameCount     = 0
+local fpsAccum       = 0
+
+RunService.RenderStepped:Connect(function(dt)
+    if not _G.Kraken_Active then return end
+    frameCount += 1
+    fpsAccum   += 1 / dt
+    local now = tick()
+    if now - lastPerfUpdate >= perfCfg.UpdateRate then
+        if perfCfg.ShowFPS then
+            local fps = math.floor(fpsAccum / frameCount)
+            FPSLabel.Text       = fps .. " " .. perfCfg.LabelFPS
+            FPSLabel.TextColor3 = perfColor(fps, perfCfg.FPSWarn, perfCfg.FPSBad, false)
+        end
+        if perfCfg.ShowPing then
+            local ok, ping = pcall(function()
+                return math.floor(StatsService.Network.ServerStatsItem["Data Ping"]:GetValue())
+            end)
+            local pingVal = ok and ping or 0
+            PingLabel.Text       = pingVal .. " " .. perfCfg.LabelPing
+            PingLabel.TextColor3 = perfColor(pingVal, perfCfg.PingWarn, perfCfg.PingBad, true)
+        end
+        frameCount     = 0
+        fpsAccum       = 0
+        lastPerfUpdate = now
+    end
+end)
+
+-- ── Notify ────────────────────────────────────────────────────────────────────
+local notifCount = 0
+local function Notify(label, state)
+    notifCount += 1
+    local order = notifCount
+    local accentColor = state and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(255, 70, 70)
+    local toast = Instance.new("Frame", NotifContainer)
+    toast.Size = UDim2.new(1, 0, 0, 34)
+    toast.BackgroundColor3 = cfg.BG
+    toast.BorderSizePixel = 0
+    toast.LayoutOrder = order
+    toast.BackgroundTransparency = 1
+    toast.ZIndex = 100
+    Instance.new("UICorner", toast).CornerRadius = UDim.new(0, 7)
+    local stroke = Instance.new("UIStroke", toast)
+    stroke.Color = Color3.fromRGB(30, 55, 40)
+    stroke.Thickness = 1
+    stroke.Transparency = 1
+    local bar = Instance.new("Frame", toast)
+    bar.Size = UDim2.new(0, 2, 0.65, 0)
+    bar.Position = UDim2.new(0, 7, 0.175, 0)
+    bar.BackgroundColor3 = accentColor
+    bar.BorderSizePixel = 0
+    bar.BackgroundTransparency = 1
+    bar.ZIndex = 101
+    Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
+    local dot = Instance.new("Frame", toast)
+    dot.Size = UDim2.new(0, 6, 0, 6)
+    dot.Position = UDim2.new(0, 17, 0.5, -3)
+    dot.BorderSizePixel = 0
+    dot.BackgroundColor3 = accentColor
+    dot.BackgroundTransparency = 1
+    dot.ZIndex = 101
+    Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+    local txt = Instance.new("TextLabel", toast)
+    txt.Size = UDim2.new(1, -32, 1, 0)
+    txt.Position = UDim2.new(0, 30, 0, 0)
+    txt.BackgroundTransparency = 1
+    txt.Font = Enum.Font.Code
+    txt.TextSize = 12
+    txt.TextColor3 = cfg.Text
+    txt.Text = label
+    txt.TextXAlignment = Enum.TextXAlignment.Left
+    txt.TextTruncate = Enum.TextTruncate.AtEnd
+    txt.TextTransparency = 1
+    txt.ZIndex = 101
+    task.defer(function()
+        TweenService:Create(toast,  TweenInfo.new(0.28, Enum.EasingStyle.Quint), {BackgroundTransparency = 0.06}):Play()
+        TweenService:Create(stroke, TweenInfo.new(0.28, Enum.EasingStyle.Quint), {Transparency = 0.2}):Play()
+        TweenService:Create(bar,    TweenInfo.new(0.28, Enum.EasingStyle.Quint), {BackgroundTransparency = 0}):Play()
+        TweenService:Create(dot,    TweenInfo.new(0.28, Enum.EasingStyle.Quint), {BackgroundTransparency = 0}):Play()
+        TweenService:Create(txt,    TweenInfo.new(0.28, Enum.EasingStyle.Quint), {TextTransparency = 0}):Play()
+    end)
+    task.delay(2.6, function()
+        if not toast or not toast.Parent then return end
+        local fadeOut = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+        TweenService:Create(toast,  fadeOut, {BackgroundTransparency = 1}):Play()
+        TweenService:Create(stroke, fadeOut, {Transparency = 1}):Play()
+        TweenService:Create(bar,    fadeOut, {BackgroundTransparency = 1}):Play()
+        TweenService:Create(dot,    fadeOut, {BackgroundTransparency = 1}):Play()
+        local t2 = TweenService:Create(txt, fadeOut, {TextTransparency = 1})
+        t2:Play()
+        t2.Completed:Connect(function()
+            pcall(function() toast:Destroy() end)
+        end)
+    end)
+end
+
+-- ── Feature loops ─────────────────────────────────────────────────────────────
+local TPLoopConnection   = nil
+local TPLastTP           = 0
+local LootLoopConnection = nil
+local StaminaConnection  = nil
+
+local function StopStamina()
+    if StaminaConnection then StaminaConnection:Disconnect() StaminaConnection = nil end
+end
+
+local function StartStamina()
+    StopStamina()
+    StaminaConnection = RunService.Heartbeat:Connect(function()
+        pcall(function()
+            local pf = workspace.Live:FindFirstChild(LocalPlayer.Name)
+            if pf then
+                local s = pf:FindFirstChild("Stamina")
+                if s and s:IsA("IntConstrainedValue") then
+                    s.MaxValue = 999; s.MinValue = 999; s.Value = 999
+                end
+            end
+        end)
+    end)
+end
+
+local lootInterval     = 0.2
+local lootTPDelay      = 1
+local lootLoopDuration = 15
+
+local function TeleportToItemCache()
+    local thrown = workspace:FindFirstChild("Thrown")
+    local item   = thrown and thrown:FindFirstChild("itemCacheModel")
+    if not item then TPStatusLabel.Text = "No itemCache found" return false end
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return false end
+    local root = char.HumanoidRootPart
+    local targetCF = item:IsA("Model") and item:GetPivot() or item.CFrame
+    root.CFrame = targetCF + Vector3.new(math.random(-5,5)/10, 3, math.random(-5,5)/10)
+    TPStatusLabel.Text = "ItemCache TP done"
+    HintLabel.Visible  = false
+    return true
+end
+
+local function StartTPLoop()
+    if TPLoopConnection then return end
+    HintLabel.Visible = false
+    TPLoopConnection = task.spawn(function()
+        local vu = game:GetService("VirtualInputManager")
+        local lastXPress = 0
+        while cfg.TP and _G.Kraken_Active do
+            local now = tick()
+            if now - lastXPress > 0.03 then
+                vu:SendKeyEvent(true,  Enum.KeyCode.X, false, game)
+                task.wait(0.01)
+                vu:SendKeyEvent(false, Enum.KeyCode.X, false, game)
+                lastXPress = tick()
+            end
+            if now - TPLastTP >= 3 then
+                TPStatusLabel.Text = "Looping  ·  X spam active"
+                if TeleportToItemCache() then TPLastTP = now end
+            end
+            task.wait()
+        end
+        TPLoopConnection = nil
+    end)
+end
+
+local function StopTPLoop()
+    if TPLoopConnection then pcall(task.cancel, TPLoopConnection) TPLoopConnection = nil end
+    TPStatusLabel.Text = ""
+    HintLabel.Visible  = true
+end
+
+local function StartLootLoop()
+    if LootLoopConnection then return end
+    HintLabel.Visible = false
+    LootLoopConnection = task.spawn(function()
+        local vu         = game:GetService("VirtualInputManager")
+        local lastXPress = 0
+        local lootFolder = workspace:FindFirstChild("LootFolder")
+        if not lootFolder then
+            TPStatusLabel.Text = "No LootFolder found"
+            LootLoopConnection = nil
+            cfg.LootLoop = false
+            HintLabel.Visible = true
+            return
+        end
+        while cfg.LootLoop and _G.Kraken_Active do
+            local startTime = tick()
+            TPStatusLabel.Text = "Loot Farm running..."
+            while tick() - startTime < lootLoopDuration and cfg.LootLoop and _G.Kraken_Active do
+                for _, loot in ipairs(lootFolder:GetChildren()) do
+                    if not cfg.LootLoop or not _G.Kraken_Active then break end
+                    if loot.Name == "Loot" then
+                        local char = LocalPlayer.Character
+                        local root = char and char:FindFirstChild("HumanoidRootPart")
+                        if root then
+                            root.CFrame = loot.CFrame + Vector3.new(math.random(-5,5)/10, 3, math.random(-5,5)/10)
+                        end
+                        local now = tick()
+                        if now - lastXPress > 0.03 then
+                            vu:SendKeyEvent(true,  Enum.KeyCode.X, false, game)
+                            task.wait(0.01)
+                            vu:SendKeyEvent(false, Enum.KeyCode.X, false, game)
+                            lastXPress = tick()
+                        end
+                        task.wait(lootInterval + lootTPDelay)
+                    end
+                end
+                task.wait(0.1)
+            end
+            TPStatusLabel.Text = "Cycle done  ·  restarting..."
+            task.wait(1)
+        end
+        TPStatusLabel.Text = ""
+        HintLabel.Visible  = true
+        LootLoopConnection = nil
+    end)
+end
+
+local function StopLootLoop()
+    if LootLoopConnection then pcall(task.cancel, LootLoopConnection) LootLoopConnection = nil end
+    cfg.LootLoop = false
+    TPStatusLabel.Text = ""
+    HintLabel.Visible  = true
+end
+
+-- ── Toggle pills ──────────────────────────────────────────────────────────────
+local pillRefreshers = {}
+local toggleDebounce = {}
+
+local function SectionHeader(parent, text, order)
+    local container = Instance.new("Frame", parent)
+    container.Size = UDim2.new(1, 0, 0, 28)
+    container.BackgroundTransparency = 1
+    container.LayoutOrder = order
+    local label = Instance.new("TextLabel", container)
+    label.Size = UDim2.new(1, 0, 0, 18)
+    label.Position = UDim2.new(0, 0, 0.5, -9)
+    label.Text = text
+    label.Font = Enum.Font.Code
+    label.TextSize = 11
+    label.TextColor3 = cfg.Accent
+    label.TextTransparency = 0.3
+    label.BackgroundTransparency = 1
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    local line = Instance.new("Frame", container)
+    line.Size = UDim2.new(1, 0, 0, 1)
+    line.Position = UDim2.new(0, 0, 1, -1)
+    line.BackgroundColor3 = Color3.fromRGB(20, 40, 28)
+    line.BorderSizePixel = 0
+end
+
+-- ── Inline keybind listen state (Toggles tab "..." buttons) ──────────────────
+local featureBindBtns = {}
+
+local FORBIDDEN_FEATURE_KEYS = {
+    [Enum.KeyCode.Unknown]       = true,
+    [Enum.KeyCode.LeftShift]     = true,
+    [Enum.KeyCode.RightShift]    = true,
+    [Enum.KeyCode.LeftControl]   = true,
+    [Enum.KeyCode.RightControl]  = true,
+    [Enum.KeyCode.LeftAlt]       = true,
+    [Enum.KeyCode.RightAlt]      = true,
+    [Enum.KeyCode.LeftMeta]      = true,
+    [Enum.KeyCode.RightMeta]     = true,
+    [Enum.KeyCode.CapsLock]      = true,
+    [Enum.KeyCode.Tab]           = true,
+    [Enum.KeyCode.Return]        = true,
+    [Enum.KeyCode.KeypadEnter]   = true,
+    [Enum.KeyCode.Delete]        = true,
+    [Enum.KeyCode.F1]  = true, [Enum.KeyCode.F2]  = true,
+    [Enum.KeyCode.F3]  = true, [Enum.KeyCode.F4]  = true,
+    [Enum.KeyCode.F5]  = true, [Enum.KeyCode.F6]  = true,
+    [Enum.KeyCode.F7]  = true, [Enum.KeyCode.F8]  = true,
+    [Enum.KeyCode.F9]  = true, [Enum.KeyCode.F10] = true,
+    [Enum.KeyCode.F11] = true, [Enum.KeyCode.F12] = true,
+}
+
+local activeDotsThread = nil
+
+local function startDotsAnimation(btn)
+    if activeDotsThread then task.cancel(activeDotsThread) activeDotsThread = nil end
+    activeDotsThread = task.spawn(function()
+        local frames = {".", "..", "..."}
+        local i = 1
+        while true do
+            if not btn or not btn.Parent then break end
+            btn.Text = frames[i]
+            i = (i % #frames) + 1
+            task.wait(0.35)
+        end
+    end)
+end
+
+local function stopDotsAnimation()
+    if activeDotsThread then task.cancel(activeDotsThread) activeDotsThread = nil end
+end
+
+local function featureBindLabel(cfgKey)
+    local kc = featureBinds[cfgKey]
+    if kc then return keyName(kc) else return "···" end
+end
+
+local function setFeatureListening(cfgKey, active)
+    local btn = featureBindBtns[cfgKey]
+    if not btn then return end
+    if active then
+        if listeningFeature and listeningFeature ~= cfgKey then
+            local oldBtn = featureBindBtns[listeningFeature]
+            if oldBtn then
+                stopDotsAnimation()
+                oldBtn.Text = featureBindLabel(listeningFeature)
+                TweenService:Create(oldBtn, TweenInfo.new(0.12), {TextColor3 = Color3.fromRGB(80, 130, 95), TextTransparency = 0.35}):Play()
+            end
+        end
+        listeningFeature = cfgKey
+        startDotsAnimation(btn)
+        TweenService:Create(btn, TweenInfo.new(0.12), {TextColor3 = cfg.Accent, TextTransparency = 0}):Play()
+    else
+        if listeningFeature == cfgKey then listeningFeature = nil end
+        stopDotsAnimation()
+        btn.Text = featureBindLabel(cfgKey)
+        TweenService:Create(btn, TweenInfo.new(0.12), {TextColor3 = Color3.fromRGB(80, 130, 95), TextTransparency = 0.35}):Play()
+    end
+end
+
+-- ── Toggle row builder ────────────────────────────────────────────────────────
+local function Toggle(parent, text, key, order)
+    local Wrapper = Instance.new("Frame", parent)
+    Wrapper.Size = UDim2.new(1, 0, 0, 28)
+    Wrapper.BackgroundTransparency = 1
+    Wrapper.LayoutOrder = order or 0
+
+    local BindBtn = Instance.new("TextButton", Wrapper)
+    BindBtn.Size = UDim2.new(0, 20, 1, 0)
+    BindBtn.Position = UDim2.new(1, -52, 0, 0)
+    BindBtn.BackgroundTransparency = 1
+    BindBtn.Font = Enum.Font.Code
+    BindBtn.TextSize = 12
+    BindBtn.TextColor3 = Color3.fromRGB(80, 130, 95)
+    BindBtn.TextTransparency = 0.35
+    BindBtn.Text = featureBindLabel(key)
+    BindBtn.AutoButtonColor = false
+    BindBtn.ZIndex = 3
+
+    featureBindBtns[key] = BindBtn
+
+    BindBtn.MouseButton1Click:Connect(function()
+        if listeningFeature == key then
+            setFeatureListening(key, false)
+        else
+            setFeatureListening(key, true)
+        end
+    end)
+
+    local Btn = Instance.new("TextButton", Wrapper)
+    Btn.Size = UDim2.new(1, 0, 1, 0)
+    Btn.Text = ""
+    Btn.BackgroundTransparency = 1
+    Btn.ZIndex = 2
+
+    local Highlight = Instance.new("Frame", Btn)
+    Highlight.Size = UDim2.new(1, 0, 1, 0)
+    Highlight.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
+    Highlight.BackgroundTransparency = 1
+    Highlight.BorderSizePixel = 0
+    Instance.new("UICorner", Highlight).CornerRadius = UDim.new(0, 5)
+
+    local PillBG = Instance.new("Frame", Btn)
+    PillBG.Size = UDim2.new(0, 28, 0, 15)
+    PillBG.Position = UDim2.new(1, -28, 0.5, -7)
+    PillBG.BackgroundColor3 = Color3.fromRGB(20, 35, 25)
+    PillBG.BorderSizePixel = 0
+    Instance.new("UICorner", PillBG).CornerRadius = UDim.new(1, 0)
+
+    local PillStroke = Instance.new("UIStroke", PillBG)
+    PillStroke.Color = Color3.fromRGB(35, 60, 44)
+    PillStroke.Thickness = 1
+
+    local Dot = Instance.new("Frame", PillBG)
+    Dot.Size = UDim2.new(0, 10, 0, 10)
+    Dot.Position = UDim2.new(0, 2, 0.5, -5)
+    Dot.BackgroundColor3 = Color3.fromRGB(60, 80, 65)
+    Dot.BorderSizePixel = 0
+    Instance.new("UICorner", Dot).CornerRadius = UDim.new(1, 0)
+
+    local isOn = cfg[key] == true
+    if isOn then
+        Dot.Position = UDim2.new(1, -12, 0.5, -5)
+        Dot.BackgroundColor3 = cfg.Accent
+        PillBG.BackgroundColor3 = Color3.fromRGB(0, 60, 25)
+        PillStroke.Color = cfg.Accent
+        PillStroke.Transparency = 0.5
+    end
+
+    local Label = Instance.new("TextLabel", Btn)
+    Label.Size = UDim2.new(1, -60, 1, 0)
+    Label.Position = UDim2.new(0, 4, 0, 0)
+    Label.Text = text
+    Label.Font = Enum.Font.Code
+    Label.TextSize = 13
+    Label.TextColor3 = cfg.Text
+    Label.TextTransparency = 0.2
+    Label.BackgroundTransparency = 1
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+
+    local function refreshVisual(on)
+        TweenService:Create(Dot,        TweenInfo.new(0.18, Enum.EasingStyle.Quad), {Position = on and UDim2.new(1,-12,0.5,-5) or UDim2.new(0,2,0.5,-5), BackgroundColor3 = on and cfg.Accent or Color3.fromRGB(60,80,65)}):Play()
+        TweenService:Create(PillBG,     TweenInfo.new(0.18, Enum.EasingStyle.Quad), {BackgroundColor3 = on and Color3.fromRGB(0,60,25) or Color3.fromRGB(20,35,25)}):Play()
+        TweenService:Create(PillStroke, TweenInfo.new(0.18, Enum.EasingStyle.Quad), {Color = on and cfg.Accent or Color3.fromRGB(35,60,44), Transparency = on and 0.5 or 1}):Play()
+        TweenService:Create(Label,      TweenInfo.new(0.12, Enum.EasingStyle.Quad), {TextTransparency = on and 0 or 0.2}):Play()
+    end
+    pillRefreshers[key] = refreshVisual
+
+    Btn.MouseEnter:Connect(function() TweenService:Create(Highlight, TweenInfo.new(0.12), {BackgroundTransparency = 0.94}):Play() end)
+    Btn.MouseLeave:Connect(function() TweenService:Create(Highlight, TweenInfo.new(0.12), {BackgroundTransparency = 1}):Play() end)
+
+    Btn.MouseButton1Click:Connect(function()
+        if listeningBind or listeningFeature then return end
+        local now = tick()
+        if toggleDebounce[key] and (now - toggleDebounce[key]) < 0.15 then return end
+        toggleDebounce[key] = now
+        local newState = not cfg[key]
+        cfg[key] = newState
+        refreshVisual(newState)
+        Notify(text .. "  >>  " .. (newState and "ON" or "OFF"), newState)
+        if key == "Fly"      then SetFly(newState) end
+        if key == "Noclip"   then SetNoclip(newState) end
+        if key == "ESP"      then cfg.Box = newState; cfg.Name = newState; cfg.Health = newState; cfg.Dist = newState end
+        if key == "TP"       then if newState then StartTPLoop()   else StopTPLoop()   end end
+        if key == "LootLoop" then if newState then StartLootLoop() else StopLootLoop() end end
+        if key == "InfiniteStamina" then if newState then StartStamina() else StopStamina() end end
+        if key == "FPSBoost" then SetFPSBoost(newState) end
+        saveConfig(cfgCurrentName)
+    end)
+
+    return Wrapper
+end
+
+-- ── Placeholder Slider builder ────────────────────────────────────────────────
+local function PlaceholderSlider(parent, labelText, order, minVal, maxVal, defaultVal, cfgKey)
+    local Row = Instance.new("Frame", parent)
+    Row.LayoutOrder = order
+    Row.Size = UDim2.new(1, 0, 0, 36)
+    Row.BackgroundTransparency = 1
+
+    local Lbl = Instance.new("TextLabel", Row)
+    Lbl.Size = UDim2.new(0.55, 0, 1, 0)
+    Lbl.Text = "· " .. labelText
+    Lbl.Font = Enum.Font.Code
+    Lbl.TextSize = 13
+    Lbl.TextColor3 = cfg.Text
+    Lbl.TextTransparency = 0.2
+    Lbl.BackgroundTransparency = 1
+    Lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    local Val = Instance.new("TextLabel", Row)
+    Val.Size = UDim2.new(0.15, 0, 1, 0)
+    Val.Position = UDim2.new(0.52, 0, 0, 0)
+    Val.Text = tostring(defaultVal)
+    Val.Font = Enum.Font.Code
+    Val.TextSize = 13
+    Val.TextColor3 = cfg.Accent
+    Val.BackgroundTransparency = 1
+    Val.TextXAlignment = Enum.TextXAlignment.Right
+
+    local Track = Instance.new("Frame", Row)
+    Track.Size = UDim2.new(0.3, 0, 0, 5)
+    Track.Position = UDim2.new(0.69, 0, 0.5, -2)
+    Track.BackgroundColor3 = Color3.fromRGB(22, 38, 28)
+    Track.BorderSizePixel = 0
+    Instance.new("UICorner", Track).CornerRadius = UDim.new(0, 3)
+
+    local initRel = (defaultVal - minVal) / (maxVal - minVal)
+
+    local Fill = Instance.new("Frame", Track)
+    Fill.Size = UDim2.new(initRel, 0, 1, 0)
+    Fill.BackgroundColor3 = cfg.Accent
+    Fill.BorderSizePixel = 0
+    Instance.new("UICorner", Fill).CornerRadius = UDim.new(0, 3)
+
+    local Thumb = Instance.new("TextButton", Track)
+    Thumb.Size = UDim2.new(0, 13, 0, 13)
+    Thumb.Position = UDim2.new(initRel, -6, 0.5, -6)
+    Thumb.BackgroundColor3 = cfg.Accent
+    Thumb.Text = ""
+    Thumb.BorderSizePixel = 0
+    Instance.new("UICorner", Thumb).CornerRadius = UDim.new(1, 0)
+
+    local dragging = false
+    Thumb.MouseButton1Down:Connect(function() dragging = true end)
+    UserInputService.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    RunService.RenderStepped:Connect(function()
+        if not dragging then return end
+        local mouse    = UserInputService:GetMouseLocation()
+        local trackPos = Track.AbsolutePosition
+        local trackSz  = Track.AbsoluteSize
+        local rel      = math.clamp((mouse.X - trackPos.X) / trackSz.X, 0, 1)
+        local newVal   = math.floor(minVal + rel * (maxVal - minVal))
+        if cfgKey then cfg[cfgKey] = newVal end
+        Fill.Size      = UDim2.new(rel, 0, 1, 0)
+        Thumb.Position = UDim2.new(rel, -6, 0.5, -6)
+        Val.Text       = tostring(newVal)
+    end)
+
+    return Row
+end
+
+-- ── Toggles Tab content ───────────────────────────────────────────────────────
+SectionHeader(Scroll, "CATEGORY  A",  0)
+Toggle(Scroll, "Feature Alpha",   "FeatureAlpha",   1)
+Toggle(Scroll, "Feature Beta",    "FeatureBeta",    2)
+Toggle(Scroll, "Feature Gamma",   "FeatureGamma",   3)
+PlaceholderSlider(Scroll, "Intensity",   4,  0, 100, 50,  nil)
+
+SectionHeader(Scroll, "CATEGORY  B",  10)
+Toggle(Scroll, "Feature Delta",   "FeatureDelta",   11)
+Toggle(Scroll, "Feature Epsilon", "FeatureEpsilon", 12)
+PlaceholderSlider(Scroll, "Speed Multiplier", 13, 1, 10, 5, nil)
+
+SectionHeader(Scroll, "CATEGORY  C",  20)
+Toggle(Scroll, "Feature Zeta",    "FeatureZeta",    21)
+Toggle(Scroll, "Feature Eta",     "FeatureEta",     22)
+PlaceholderSlider(Scroll, "Range",   23,  50, 500, 200, nil)
+
+-- ── CONFIG TAB CONTENT ────────────────────────────────────────────────────────
+local function CfgSectionHeader(text, order)
+    local container = Instance.new("Frame", ConfigScroll)
+    container.Size = UDim2.new(1, 0, 0, 28)
+    container.BackgroundTransparency = 1
+    container.LayoutOrder = order
+    local label = Instance.new("TextLabel", container)
+    label.Size = UDim2.new(1, 0, 0, 18)
+    label.Position = UDim2.new(0, 0, 0.5, -9)
+    label.Text = text
+    label.Font = Enum.Font.Code
+    label.TextSize = 11
+    label.TextColor3 = cfg.Accent
+    label.TextTransparency = 0.3
+    label.BackgroundTransparency = 1
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    local line = Instance.new("Frame", container)
+    line.Size = UDim2.new(1, 0, 0, 1)
+    line.Position = UDim2.new(0, 0, 1, -1)
+    line.BackgroundColor3 = Color3.fromRGB(20, 40, 28)
+    line.BorderSizePixel = 0
+end
+
+-- ── DISPLAY section ───────────────────────────────────────────────────────────
+CfgSectionHeader("DISPLAY", 10)
+
+local function CfgToggleRow(parent, text, key, order, onToggle)
+    local Btn = Instance.new("TextButton", parent)
+    Btn.Size = UDim2.new(1, 0, 0, 28)
+    Btn.Text = ""
+    Btn.BackgroundTransparency = 1
+    Btn.LayoutOrder = order
+
+    local Highlight = Instance.new("Frame", Btn)
+    Highlight.Size = UDim2.new(1, 0, 1, 0)
+    Highlight.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
+    Highlight.BackgroundTransparency = 1
+    Highlight.BorderSizePixel = 0
+    Instance.new("UICorner", Highlight).CornerRadius = UDim.new(0, 5)
+
+    local PillBG = Instance.new("Frame", Btn)
+    PillBG.Size = UDim2.new(0, 28, 0, 15)
+    PillBG.Position = UDim2.new(1, -28, 0.5, -7)
+    PillBG.BackgroundColor3 = Color3.fromRGB(20, 35, 25)
+    PillBG.BorderSizePixel = 0
+    Instance.new("UICorner", PillBG).CornerRadius = UDim.new(1, 0)
+
+    local PillStroke = Instance.new("UIStroke", PillBG)
+    PillStroke.Color = Color3.fromRGB(35, 60, 44)
+    PillStroke.Thickness = 1
+
+    local Dot = Instance.new("Frame", PillBG)
+    Dot.Size = UDim2.new(0, 10, 0, 10)
+    Dot.Position = UDim2.new(0, 2, 0.5, -5)
+    Dot.BackgroundColor3 = Color3.fromRGB(60, 80, 65)
+    Dot.BorderSizePixel = 0
+    Instance.new("UICorner", Dot).CornerRadius = UDim.new(1, 0)
+
+    local isOn = cfg[key] == true
+    if isOn then
+        Dot.Position = UDim2.new(1, -12, 0.5, -5)
+        Dot.BackgroundColor3 = cfg.Accent
+        PillBG.BackgroundColor3 = Color3.fromRGB(0, 60, 25)
+        PillStroke.Color = cfg.Accent
+        PillStroke.Transparency = 0.5
+    end
+
+    local Label = Instance.new("TextLabel", Btn)
+    Label.Size = UDim2.new(1, -40, 1, 0)
+    Label.Position = UDim2.new(0, 4, 0, 0)
+    Label.Text = text
+    Label.Font = Enum.Font.Code
+    Label.TextSize = 13
+    Label.TextColor3 = cfg.Text
+    Label.TextTransparency = 0.2
+    Label.BackgroundTransparency = 1
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+
+    Btn.MouseEnter:Connect(function() TweenService:Create(Highlight, TweenInfo.new(0.12), {BackgroundTransparency = 0.94}):Play() end)
+    Btn.MouseLeave:Connect(function() TweenService:Create(Highlight, TweenInfo.new(0.12), {BackgroundTransparency = 1}):Play() end)
+
+    Btn.MouseButton1Click:Connect(function()
+        local newState = not cfg[key]
+        cfg[key] = newState
+        TweenService:Create(Dot,        TweenInfo.new(0.18, Enum.EasingStyle.Quad), {Position = newState and UDim2.new(1,-12,0.5,-5) or UDim2.new(0,2,0.5,-5), BackgroundColor3 = newState and cfg.Accent or Color3.fromRGB(60,80,65)}):Play()
+        TweenService:Create(PillBG,     TweenInfo.new(0.18, Enum.EasingStyle.Quad), {BackgroundColor3 = newState and Color3.fromRGB(0,60,25) or Color3.fromRGB(20,35,25)}):Play()
+        TweenService:Create(PillStroke, TweenInfo.new(0.18, Enum.EasingStyle.Quad), {Color = newState and cfg.Accent or Color3.fromRGB(35,60,44), Transparency = newState and 0.5 or 1}):Play()
+        if onToggle then onToggle(newState) end
+        saveConfig(cfgCurrentName)
+        Notify(text .. "  >>  " .. (newState and "ON" or "OFF"), newState)
+    end)
+end
+
+CfgToggleRow(ConfigScroll, "FPS / Ping Bar", "ShowPerfBar", 11, function(v)
+    PerfFrame.Visible = v
+end)
+
+-- ── PERFORMANCE section ───────────────────────────────────────────────────────
+CfgSectionHeader("PERFORMANCE", 20)
+
+CfgToggleRow(ConfigScroll, "FPS Boost  (removes textures)", "FPSBoost", 21, function(v)
+    SetFPSBoost(v)
+end)
+
+local FPSNote = Instance.new("TextLabel", ConfigScroll)
+FPSNote.Size = UDim2.new(1, 0, 0, 28)
+FPSNote.BackgroundTransparency = 1
+FPSNote.LayoutOrder = 22
+FPSNote.Font = Enum.Font.Code
+FPSNote.TextSize = 11
+FPSNote.TextColor3 = Color3.fromRGB(180, 140, 60)
+FPSNote.TextTransparency = 0.35
+FPSNote.TextWrapped = true
+FPSNote.TextXAlignment = Enum.TextXAlignment.Left
+FPSNote.Text = "  · Textures + lighting effects removed while active"
+
+-- ── CONFIG FILES section ──────────────────────────────────────────────────────
+CfgSectionHeader("CONFIG FILES", 40)
+
+local NameRow = Instance.new("Frame", ConfigScroll)
+NameRow.Size = UDim2.new(1, 0, 0, 32)
+NameRow.BackgroundTransparency = 1
+NameRow.LayoutOrder = 41
+
+local NameLbl = Instance.new("TextLabel", NameRow)
+NameLbl.Size = UDim2.new(0.38, 0, 1, 0)
+NameLbl.BackgroundTransparency = 1
+NameLbl.Font = Enum.Font.Code
+NameLbl.TextSize = 12
+NameLbl.TextColor3 = cfg.Text
+NameLbl.TextTransparency = 0.2
+NameLbl.TextXAlignment = Enum.TextXAlignment.Left
+NameLbl.Text = "· Config Name"
+
+local NameBox = Instance.new("TextBox", NameRow)
+NameBox.Size = UDim2.new(0.6, 0, 0, 24)
+NameBox.Position = UDim2.new(0.39, 0, 0.5, -12)
+NameBox.BackgroundColor3 = Color3.fromRGB(14, 26, 18)
+NameBox.BorderSizePixel = 0
+NameBox.Font = Enum.Font.Code
+NameBox.TextSize = 12
+NameBox.TextColor3 = cfg.Accent
+NameBox.PlaceholderText = "config name..."
+NameBox.PlaceholderColor3 = Color3.fromRGB(50, 90, 60)
+NameBox.Text = cfgCurrentName
+NameBox.ClearTextOnFocus = false
+Instance.new("UICorner", NameBox).CornerRadius = UDim.new(0, 5)
+local NameStroke = Instance.new("UIStroke", NameBox)
+NameStroke.Color = Color3.fromRGB(30, 60, 40)
+NameStroke.Thickness = 1
+
+NameBox:GetPropertyChangedSignal("Text"):Connect(function()
+    local clean = NameBox.Text:gsub("[/\\%.%s]", "_")
+    if clean ~= NameBox.Text then NameBox.Text = clean end
+    cfgCurrentName = clean == "" and "default" or clean
+end)
+
+local function CfgActionBtn(text, color, order, onClick)
+    local Row = Instance.new("Frame", ConfigScroll)
+    Row.Size = UDim2.new(1, 0, 0, 30)
+    Row.BackgroundTransparency = 1
+    Row.LayoutOrder = order
+
+    local Btn = Instance.new("TextButton", Row)
+    Btn.Size = UDim2.new(1, 0, 0, 24)
+    Btn.Position = UDim2.new(0, 0, 0.5, -12)
+    Btn.BackgroundColor3 = Color3.fromRGB(14, 26, 18)
+    Btn.BorderSizePixel = 0
+    Btn.Font = Enum.Font.Code
+    Btn.TextSize = 12
+    Btn.TextColor3 = color
+    Btn.Text = text
+    Btn.AutoButtonColor = false
+    Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 5)
+    local Stroke = Instance.new("UIStroke", Btn)
+    Stroke.Color = color
+    Stroke.Thickness = 1
+    Stroke.Transparency = 0.6
+
+    Btn.MouseEnter:Connect(function()
+        TweenService:Create(Btn,    TweenInfo.new(0.12), {BackgroundColor3 = Color3.fromRGB(20, 38, 26)}):Play()
+        TweenService:Create(Stroke, TweenInfo.new(0.12), {Transparency = 0.2}):Play()
+    end)
+    Btn.MouseLeave:Connect(function()
+        TweenService:Create(Btn,    TweenInfo.new(0.12), {BackgroundColor3 = Color3.fromRGB(14, 26, 18)}):Play()
+        TweenService:Create(Stroke, TweenInfo.new(0.12), {Transparency = 0.6}):Play()
+    end)
+    Btn.MouseButton1Click:Connect(onClick)
+    return Btn
+end
+
+CfgActionBtn("Save Config", cfg.Accent, 42, function()
+    local name = cfgCurrentName
+    local ok = saveConfig(name)
+    refreshConfigList()
+    Notify(ok and ("Saved: " .. name) or "Save failed", ok)
+end)
+
+CfgActionBtn("Load Config", Color3.fromRGB(80, 180, 255), 43, function()
+    local name = cfgCurrentName
+    local ok, msg = loadConfig(name)
+    if ok then
+        for k, fn in pairs(pillRefreshers) do fn(cfg[k] == true) end
+        for k, btn in pairs(bindButtons) do btn.Text = keyName(binds[k]) end
+        if cfg.Fly             then SetFly(true)        end
+        if cfg.Noclip          then SetNoclip(true)     end
+        if cfg.FPSBoost        then SetFPSBoost(true)   end
+        if cfg.InfiniteStamina then StartStamina()      end
+        if cfg.TP              then StartTPLoop()        end
+        if cfg.LootLoop        then StartLootLoop()     end
+        PerfFrame.Visible = cfg.ShowPerfBar
+        HintLabel.Text = keyName(binds.Menu) .. "  ·  toggle menu"
+        Notify("Loaded: " .. name, true)
+    else
+        Notify("Load failed: " .. msg, false)
+    end
+end)
+
+CfgActionBtn("Set as Auto-Load", Color3.fromRGB(255, 200, 50), 44, function()
+    local name = cfgCurrentName
+    if not isfile(cfgPath(name)) then
+        Notify("Save it first: " .. name, false)
+        return
+    end
+    setAutoLoad(name)
+    refreshConfigList()
+    Notify("Auto-load set to: " .. name, true)
+end)
+
+CfgActionBtn("Clear Auto-Load", Color3.fromRGB(200, 140, 40), 45, function()
+    clearAutoLoad()
+    refreshConfigList()
+    Notify("Auto-load cleared", true)
+end)
+
+local ListHint = Instance.new("TextLabel", ConfigScroll)
+ListHint.Size = UDim2.new(1, 0, 0, 20)
+ListHint.BackgroundTransparency = 1
+ListHint.LayoutOrder = 46
+ListHint.Font = Enum.Font.Code
+ListHint.TextSize = 11
+ListHint.TextColor3 = Color3.fromRGB(100, 160, 120)
+ListHint.TextTransparency = 0.4
+ListHint.TextXAlignment = Enum.TextXAlignment.Left
+ListHint.Text = "  · Saved configs:"
+
+local ListFrame = Instance.new("Frame", ConfigScroll)
+ListFrame.Size = UDim2.new(1, 0, 0, 90)
+ListFrame.BackgroundColor3 = Color3.fromRGB(10, 20, 14)
+ListFrame.BorderSizePixel = 0
+ListFrame.LayoutOrder = 47
+Instance.new("UICorner", ListFrame).CornerRadius = UDim.new(0, 6)
+local ListStroke = Instance.new("UIStroke", ListFrame)
+ListStroke.Color = Color3.fromRGB(25, 50, 35)
+ListStroke.Thickness = 1
+
+local ListScroll = Instance.new("ScrollingFrame", ListFrame)
+ListScroll.Size = UDim2.new(1, -6, 1, -6)
+ListScroll.Position = UDim2.new(0, 3, 0, 3)
+ListScroll.BackgroundTransparency = 1
+ListScroll.ScrollBarThickness = 2
+ListScroll.ScrollBarImageColor3 = cfg.Accent
+ListScroll.BorderSizePixel = 0
+ListScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+
+local ListLayout = Instance.new("UIListLayout", ListScroll)
+ListLayout.Padding = UDim.new(0, 2)
+ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    ListScroll.CanvasSize = UDim2.new(0, 0, 0, ListLayout.AbsoluteContentSize.Y + 4)
+end)
+
+function refreshConfigList()
+    for _, c in pairs(ListScroll:GetChildren()) do
+        if c:IsA("TextButton") or c:IsA("TextLabel") then c:Destroy() end
+    end
+    local names = listConfigs()
+    local autoName = getAutoLoad()
+    if #names == 0 then
+        local empty = Instance.new("TextLabel", ListScroll)
+        empty.Size = UDim2.new(1, 0, 0, 22)
+        empty.BackgroundTransparency = 1
+        empty.Font = Enum.Font.Code
+        empty.TextSize = 11
+        empty.TextColor3 = Color3.fromRGB(80, 120, 90)
+        empty.TextTransparency = 0.4
+        empty.Text = "  no configs saved yet"
+        empty.TextXAlignment = Enum.TextXAlignment.Left
+        return
+    end
+    for i, name in ipairs(names) do
+        local isAuto = autoName == name
+        local Row = Instance.new("TextButton", ListScroll)
+        Row.Size = UDim2.new(1, 0, 0, 22)
+        Row.BackgroundTransparency = 1
+        Row.Font = Enum.Font.Code
+        Row.TextSize = 11
+        Row.TextColor3 = isAuto and Color3.fromRGB(255, 200, 50) or cfg.Text
+        Row.TextTransparency = 0.15
+        Row.TextXAlignment = Enum.TextXAlignment.Left
+        Row.Text = "  " .. (isAuto and "★ " or "· ") .. name
+        Row.LayoutOrder = i
+        Row.AutoButtonColor = false
+        Row.MouseButton1Click:Connect(function()
+            NameBox.Text = name
+            cfgCurrentName = name
+        end)
+        Row.MouseEnter:Connect(function()
+            TweenService:Create(Row, TweenInfo.new(0.1), {TextTransparency = 0}):Play()
+        end)
+        Row.MouseLeave:Connect(function()
+            TweenService:Create(Row, TweenInfo.new(0.1), {TextTransparency = 0.15}):Play()
+        end)
+    end
+end
+
+CfgActionBtn("Delete Config", Color3.fromRGB(255, 70, 70), 48, function()
+    local name = cfgCurrentName
+    local ok = deleteConfig(name)
+    if ok then
+        local autoName = getAutoLoad()
+        if autoName == name then clearAutoLoad() end
+        refreshConfigList()
+        Notify("Deleted: " .. name, false)
+    else
+        Notify("Delete failed / not found", false)
+    end
+end)
+
+CfgActionBtn("Refresh List", Color3.fromRGB(120, 120, 120), 49, function()
+    refreshConfigList()
+    Notify("Config list refreshed", true)
+end)
+
+-- ── Tab switching ─────────────────────────────────────────────────────────────
+local activeTab = "toggles"
+local function switchTab(tab)
+    activeTab = tab
+    local onToggles = tab == "toggles"
+    Scroll.Visible       = onToggles
+    ConfigScroll.Visible = not onToggles
+    TweenService:Create(TabTogglesLine, TweenInfo.new(0.15), {BackgroundTransparency = onToggles and 0 or 1}):Play()
+    TweenService:Create(TabConfigLine,  TweenInfo.new(0.15), {BackgroundTransparency = onToggles and 1 or 0}):Play()
+    TweenService:Create(TabToggles, TweenInfo.new(0.12), {TextTransparency = onToggles and 0 or 0.5}):Play()
+    TweenService:Create(TabConfig,  TweenInfo.new(0.12), {TextTransparency = onToggles and 0.5 or 0}):Play()
+    if not onToggles and listeningFeature then
+        setFeatureListening(listeningFeature, false)
+    end
+end
+
+switchTab("toggles")
+TabToggles.MouseButton1Click:Connect(function() switchTab("toggles") end)
+TabConfig.MouseButton1Click:Connect(function() switchTab("config") end)
+
+-- ── Global key listener ───────────────────────────────────────────────────────
+UserInputService.InputBegan:Connect(function(i, gpe)
+
+    -- ── Toggles-tab inline feature bind capture ───────────────────────────────
+    if listeningFeature then
+        if i.KeyCode == Enum.KeyCode.Escape then
+            setFeatureListening(listeningFeature, false)
+            return
+        end
+        if i.UserInputType ~= Enum.UserInputType.Keyboard then return end
+        if FORBIDDEN_FEATURE_KEYS[i.KeyCode] then return end
+
+        local slot = listeningFeature
+        featureBinds[slot] = i.KeyCode
+        setFeatureListening(slot, false)
+
+        Notify("Feature bind [" .. slot .. "] → " .. keyName(i.KeyCode), true)
+        return
+    end
+
+    if gpe then return end
+
+    -- ── System hotkeys ────────────────────────────────────────────────────────
+    if i.KeyCode == binds.Menu then
+        Frame.Visible = not Frame.Visible
+
+    elseif i.KeyCode == binds.Fly then
+        local now = tick()
+        if toggleDebounce["Fly"] and (now - toggleDebounce["Fly"]) < 0.15 then return end
+        toggleDebounce["Fly"] = now
+        local newState = not cfg.Fly
+        cfg.Fly = newState
+        if pillRefreshers["Fly"] then pillRefreshers["Fly"](newState) end
+        Notify("Fly  >>  " .. (newState and "ON" or "OFF"), newState)
+        SetFly(newState)
+
+    elseif i.KeyCode == binds.Noclip then
+        local now = tick()
+        if toggleDebounce["Noclip"] and (now - toggleDebounce["Noclip"]) < 0.15 then return end
+        toggleDebounce["Noclip"] = now
+        local newState = not cfg.Noclip
+        cfg.Noclip = newState
+        if pillRefreshers["Noclip"] then pillRefreshers["Noclip"](newState) end
+        Notify("Noclip  >>  " .. (newState and "ON" or "OFF"), newState)
+        SetNoclip(newState)
+
+    elseif i.KeyCode == binds.TP then
+        local now = tick()
+        if toggleDebounce["TP"] and (now - toggleDebounce["TP"]) < 0.15 then return end
+        toggleDebounce["TP"] = now
+        local newState = not cfg.TP
+        cfg.TP = newState
+        if pillRefreshers["TP"] then pillRefreshers["TP"](newState) end
+        Notify("TP ItemCache  >>  " .. (newState and "ON" or "OFF"), newState)
+        if newState then StartTPLoop() else StopTPLoop() end
+
+    else
+        -- ── Fire feature keybinds ─────────────────────────────────────────────
+        for cfgKey, kc in pairs(featureBinds) do
+            if i.KeyCode == kc then
+                local now = tick()
+                if toggleDebounce[cfgKey] and (now - toggleDebounce[cfgKey]) < 0.15 then break end
+                toggleDebounce[cfgKey] = now
+                local newState = not cfg[cfgKey]
+                cfg[cfgKey] = newState
+                if pillRefreshers[cfgKey] then pillRefreshers[cfgKey](newState) end
+                Notify(cfgKey .. "  >>  " .. (newState and "ON" or "OFF"), newState)
+                break
+            end
+        end
+    end
+end)
+
+-- ── ESP ───────────────────────────────────────────────────────────────────────
+local GlobalTargets   = {}
+local DrawingCache    = {}
+local MobTargets      = {}
+local MobDrawingCache = {}
+
+local function PerformScan()
+    local temp = {}
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local char = player.Character
+            if char then
+                local root = char:FindFirstChild("HumanoidRootPart")
+                local hum  = char:FindFirstChildOfClass("Humanoid")
+                if root and hum and hum.Health > 0 then
+                    table.insert(temp, {Player=player, Character=char, Root=root, Hum=hum})
+                end
+            end
+        end
+    end
+    GlobalTargets = temp
+end
+
+local function PerformMobScan()
+    local temp       = {}
+    local liveFolder = workspace:FindFirstChild("Live")
+    if not liveFolder then return end
+    for _, obj in pairs(liveFolder:GetChildren()) do
+        if not obj:FindFirstChild("Loaded") then
+            local root = obj:FindFirstChild("HumanoidRootPart")
+                      or obj:FindFirstChild("Torso")
+                      or (obj:IsA("Model") and obj.PrimaryPart)
+            local hum  = obj:FindFirstChildOfClass("Humanoid")
+            if root then table.insert(temp, {Object=obj, Root=root, Hum=hum}) end
+        end
+    end
+    MobTargets = temp
+end
+
+task.spawn(function() while _G.Kraken_Active do PerformScan()    task.wait(1) end end)
+task.spawn(function() while _G.Kraken_Active do PerformMobScan() task.wait(1) end end)
+
+local playerESPKeys = {"Box","StatLevel","Name","Health","Dist"}
+local mobESPKeys    = {"Box","Name","Health","Dist"}
+
+local function hideDrawings(d, keys)
+    for _, k in ipairs(keys) do if d[k] then d[k].Visible = false end end
+end
+local function removeDrawings(d, keys)
+    for _, k in ipairs(keys) do if d[k] then pcall(function() d[k]:Remove() end) end end
+end
+local function buildLookup(targets, field)
+    local set = {}
+    for _, t in ipairs(targets) do set[t[field]] = true end
+    return set
+end
+
+local espFrame = 0
+
+RunService.RenderStepped:Connect(function()
+    espFrame = espFrame + 1
+    if espFrame % 2 ~= 0 then return end
+
+    local charSet = buildLookup(GlobalTargets, "Character")
+    for char, d in pairs(DrawingCache) do
+        if not charSet[char] then removeDrawings(d, playerESPKeys) DrawingCache[char] = nil
+        elseif not cfg.ESP   then hideDrawings(d, playerESPKeys) end
+    end
+
+    local mobSet = buildLookup(MobTargets, "Object")
+    for obj, d in pairs(MobDrawingCache) do
+        if not mobSet[obj]    then removeDrawings(d, mobESPKeys) MobDrawingCache[obj] = nil
+        elseif not cfg.MobESP then hideDrawings(d, mobESPKeys) end
+    end
+
+    local localRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local localPos  = localRoot and localRoot.Position
+
+    if cfg.ESP then
+        for _, data in ipairs(GlobalTargets) do
+            if not data.Character.Parent then continue end
+            if localPos then
+                local dist = (data.Root.Position - localPos).Magnitude
+                if dist > cfg.ESPMaxDist then
+                    local d = DrawingCache[data.Character]
+                    if d then hideDrawings(d, playerESPKeys) end
+                    continue
+                end
+            end
+            if not DrawingCache[data.Character] then
+                DrawingCache[data.Character] = {
+                    Box       = Drawing.new("Square"),
+                    Name      = Drawing.new("Text"),
+                    StatLevel = Drawing.new("Text"),
+                    Health    = Drawing.new("Square"),
+                    Dist      = Drawing.new("Text"),
+                }
+            end
+            local d = DrawingCache[data.Character]
+            local sPos, onScreen = Camera:WorldToViewportPoint(data.Root.Position)
+            if not onScreen then hideDrawings(d, playerESPKeys) continue end
+
+            local headPos = Camera:WorldToViewportPoint(data.Root.Position + Vector3.new(0, 3, 0))
+            local h = math.abs(headPos.Y - sPos.Y) * 2
+            local w = h / 1.5
+
+            if cfg.Box then
+                d.Box.Visible = true; d.Box.Size = Vector2.new(w, h)
+                d.Box.Position = Vector2.new(sPos.X - w/2, sPos.Y - h/2)
+                d.Box.Color = cfg.Accent; d.Box.Thickness = 2
+                d.Box.Filled = false; d.Box.Transparency = 1
+            else d.Box.Visible = false end
+
+            if cfg.Name then
+                d.Name.Visible = true; d.Name.Text = data.Player.Name
+                d.Name.Position = Vector2.new(sPos.X, sPos.Y - h/2 - 15)
+                d.Name.Center = true; d.Name.Color = cfg.Text
+                d.Name.Size = 14; d.Name.Outline = true; d.Name.Font = 2
+            else d.Name.Visible = false end
+
+            local statLevel = nil
+            if cfg.Name then
+                local lf = workspace:FindFirstChild("Live")
+                if lf then
+                    for _, obj in pairs(lf:GetChildren()) do
+                        if obj:GetAttribute("StatLevel") and obj.Name == data.Player.Name then
+                            statLevel = obj:GetAttribute("StatLevel") break
+                        end
+                    end
+                end
+            end
+            if statLevel then
+                d.StatLevel.Visible = true
+                d.StatLevel.Text = "Lv." .. tostring(statLevel)
+                d.StatLevel.Position = Vector2.new(sPos.X, sPos.Y - h/2 - 28)
+                d.StatLevel.Center = true; d.StatLevel.Color = Color3.fromRGB(150, 200, 170)
+                d.StatLevel.Size = 13; d.StatLevel.Outline = true; d.StatLevel.Font = 2
+            else d.StatLevel.Visible = false end
+
+            if cfg.Health then
+                local hp = data.Hum.Health / math.max(data.Hum.MaxHealth, 1)
+                d.Health.Visible = true; d.Health.Size = Vector2.new(3, h * hp)
+                d.Health.Position = Vector2.new(sPos.X - w/2 - 5, sPos.Y + h/2 - h * hp)
+                d.Health.Color = Color3.new(0, 1, 0); d.Health.Filled = true; d.Health.Transparency = 1
+            else d.Health.Visible = false end
+
+            if cfg.Dist and localPos then
+                local dist = (localPos - data.Root.Position).Magnitude
+                d.Dist.Visible = true; d.Dist.Text = math.floor(dist) .. "m"
+                d.Dist.Position = Vector2.new(sPos.X, sPos.Y + h/2 + 4)
+                d.Dist.Center = true; d.Dist.Color = cfg.Text
+                d.Dist.Size = 13; d.Dist.Outline = true; d.Dist.Font = 2
+            else d.Dist.Visible = false end
+        end
+    end
+
+    if cfg.MobESP then
+        for _, data in ipairs(MobTargets) do
+            if not data.Object.Parent then continue end
+            if localPos then
+                local dist = (data.Root.Position - localPos).Magnitude
+                if dist > cfg.ESPMaxDist then
+                    local d = MobDrawingCache[data.Object]
+                    if d then hideDrawings(d, mobESPKeys) end
+                    continue
+                end
+            end
+            if not MobDrawingCache[data.Object] then
+                MobDrawingCache[data.Object] = {
+                    Box    = Drawing.new("Square"),
+                    Name   = Drawing.new("Text"),
+                    Health = Drawing.new("Square"),
+                    Dist   = Drawing.new("Text"),
+                }
+            end
+            local d = MobDrawingCache[data.Object]
+            local sPos, onScreen = Camera:WorldToViewportPoint(data.Root.Position)
+            if not onScreen then hideDrawings(d, mobESPKeys) continue end
+
+            local headPos = Camera:WorldToViewportPoint(data.Root.Position + Vector3.new(0, 3, 0))
+            local h = math.abs(headPos.Y - sPos.Y) * 2
+            local w = h / 1.5
+
+            d.Box.Visible = true; d.Box.Size = Vector2.new(w, h)
+            d.Box.Position = Vector2.new(sPos.X - w/2, sPos.Y - h/2)
+            d.Box.Color = Color3.fromRGB(255, 165, 0); d.Box.Thickness = 2
+            d.Box.Filled = false; d.Box.Transparency = 1
+
+            d.Name.Visible = true; d.Name.Text = data.Object.Name
+            d.Name.Position = Vector2.new(sPos.X, sPos.Y - h/2 - 15)
+            d.Name.Center = true; d.Name.Color = Color3.fromRGB(255, 255, 200)
+            d.Name.Size = 13; d.Name.Outline = true; d.Name.Font = 2
+
+            if data.Hum then
+                local hp = data.Hum.Health / math.max(data.Hum.MaxHealth, 1)
+                d.Health.Visible = true; d.Health.Size = Vector2.new(3, h * hp)
+                d.Health.Position = Vector2.new(sPos.X - w/2 - 5, sPos.Y + h/2 - h * hp)
+                d.Health.Color = Color3.new(1, 0.5, 0); d.Health.Filled = true; d.Health.Transparency = 1
+            else d.Health.Visible = false end
+
+            if localPos then
+                local dist = (localPos - data.Root.Position).Magnitude
+                d.Dist.Visible = true; d.Dist.Text = math.floor(dist) .. "m"
+                d.Dist.Position = Vector2.new(sPos.X, sPos.Y + h/2 + 4)
+                d.Dist.Center = true; d.Dist.Color = Color3.fromRGB(255, 255, 200)
+                d.Dist.Size = 12; d.Dist.Outline = true; d.Dist.Font = 2
+            else d.Dist.Visible = false end
+        end
+    end
+end)
+
+-- ── Initial list population + auto load ──────────────────────────────────────
+task.defer(function()
+    refreshConfigList()
+    local autoName = getAutoLoad()
+    if autoName and autoName ~= "" then
+        local ok, msg = loadConfig(autoName)
+        if ok then
+            for k, fn in pairs(pillRefreshers) do fn(cfg[k] == true) end
+            for k, btn in pairs(bindButtons) do btn.Text = keyName(binds[k]) end
+            if cfg.Fly             then SetFly(true)        end
+            if cfg.Noclip          then SetNoclip(true)     end
+            if cfg.FPSBoost        then SetFPSBoost(true)   end
+            if cfg.InfiniteStamina then StartStamina()      end
+            if cfg.TP              then StartTPLoop()        end
+            if cfg.LootLoop        then StartLootLoop()     end
+            PerfFrame.Visible = cfg.ShowPerfBar
+            HintLabel.Text = keyName(binds.Menu) .. "  ·  toggle menu"
+            Notify("Auto-loaded: " .. autoName, true)
+        else
+            Notify("Auto-load failed: " .. autoName, false)
+        end
+    end
+end)
