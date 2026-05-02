@@ -100,15 +100,82 @@ local cfg = {
     ESPMaxDist = 500,
     ShowPerfBar = true,
     FPSBoost = false,
-    -- Placeholder toggle states
-    FeatureAlpha   = false,
-    FeatureBeta    = false,
-    FeatureGamma   = false,
-    FeatureDelta   = false,
-    FeatureEpsilon = false,
-    FeatureZeta    = false,
-    FeatureEta     = false,
+    -- Bundled AutoDefense bridge states
+    FeatureAlpha   = false, -- EnableAutoDefense
+    FeatureBeta    = false, -- DashOnParryCooldown
+    FeatureGamma   = false, -- DeflectBlockFallback
+    FeatureDelta   = false, -- AllowFailure
+    FeatureEpsilon = false, -- AutoTimingPrompt
+    FeatureZeta    = false, -- AimLock
+    FeatureEta     = false, -- EnableNotifications
+    DeflectHoldTime = 0,
 }
+
+-- ── Bundled UI bridge / replacement helpers ───────────────────────────────────
+local function bundledSetToggle(key, value)
+    local toggles = rawget(_G, "Toggles")
+    local t = toggles and toggles[key]
+    if not t then return false end
+    local ok = pcall(function()
+        if t.SetValue then t:SetValue(value and true or false) else t.Value = (value and true or false) end
+    end)
+    return ok
+end
+
+local function bundledSetOption(key, value)
+    local options = rawget(_G, "Options")
+    local o = options and options[key]
+    if not o then return false end
+    local ok = pcall(function()
+        if o.SetValue then o:SetValue(value) else o.Value = value end
+    end)
+    return ok
+end
+
+local function applyBundledBridge()
+    bundledSetToggle("EnableAutoDefense", cfg.FeatureAlpha)
+    bundledSetToggle("DashOnParryCooldown", cfg.FeatureBeta)
+    bundledSetToggle("DeflectBlockFallback", cfg.FeatureGamma)
+    bundledSetToggle("AllowFailure", cfg.FeatureDelta)
+    bundledSetToggle("AutoTimingPrompt", cfg.FeatureEpsilon)
+    bundledSetToggle("AimLock", cfg.FeatureZeta)
+    bundledSetToggle("EnableNotifications", cfg.FeatureEta)
+    bundledSetOption("DeflectHoldTime", cfg.DeflectHoldTime)
+end
+
+local function hideBundledUiIfRequested()
+    if _G.PTG_HIDE_BUNDLED_UI == false then
+        return
+    end
+    local core = game:GetService("CoreGui")
+    for _, gui in ipairs(core:GetChildren()) do
+        if gui == ScreenGui then
+            continue
+        end
+        if not gui:IsA("ScreenGui") then
+            continue
+        end
+        local shouldHide = false
+        pcall(function()
+            if gui.Name:lower():find("linoria", 1, true) then
+                shouldHide = true
+            end
+        end)
+        if not shouldHide then
+            pcall(function()
+                for _, d in ipairs(gui:GetDescendants()) do
+                    if d:IsA("TextLabel") and type(d.Text) == "string" and d.Text:find("Linoria", 1, true) then
+                        shouldHide = true
+                        break
+                    end
+                end
+            end)
+        end
+        if shouldHide then
+            pcall(function() gui.Enabled = false end)
+        end
+    end
+end
 
 -- ── Keybind config (changeable at runtime) ───────────────────────────────────
 local binds = {
@@ -1376,6 +1443,7 @@ local function Toggle(parent, text, key, order)
         if key == "LootLoop" then if newState then StartLootLoop() else StopLootLoop() end end
         if key == "InfiniteStamina" then if newState then StartStamina() else StopStamina() end end
         if key == "FPSBoost" then SetFPSBoost(newState) end
+        applyBundledBridge()
         saveConfig(cfgCurrentName)
     end)
 
@@ -1383,7 +1451,7 @@ local function Toggle(parent, text, key, order)
 end
 
 -- ── Placeholder Slider builder ────────────────────────────────────────────────
-local function PlaceholderSlider(parent, labelText, order, minVal, maxVal, defaultVal, cfgKey)
+local function PlaceholderSlider(parent, labelText, order, minVal, maxVal, defaultVal, cfgKey, onChanged)
     local Row = Instance.new("Frame", parent)
     Row.LayoutOrder = order
     Row.Size = UDim2.new(1, 0, 0, 36)
@@ -1445,6 +1513,7 @@ local function PlaceholderSlider(parent, labelText, order, minVal, maxVal, defau
         local rel      = math.clamp((mouse.X - trackPos.X) / trackSz.X, 0, 1)
         local newVal   = math.floor(minVal + rel * (maxVal - minVal))
         if cfgKey then cfg[cfgKey] = newVal end
+        if onChanged then pcall(onChanged, newVal) end
         Fill.Size      = UDim2.new(rel, 0, 1, 0)
         Thumb.Position = UDim2.new(rel, -6, 0.5, -6)
         Val.Text       = tostring(newVal)
@@ -1454,21 +1523,19 @@ local function PlaceholderSlider(parent, labelText, order, minVal, maxVal, defau
 end
 
 -- ── Toggles Tab content ───────────────────────────────────────────────────────
-SectionHeader(Scroll, "CATEGORY  A",  0)
-Toggle(Scroll, "Feature Alpha",   "FeatureAlpha",   1)
-Toggle(Scroll, "Feature Beta",    "FeatureBeta",    2)
-Toggle(Scroll, "Feature Gamma",   "FeatureGamma",   3)
-PlaceholderSlider(Scroll, "Intensity",   4,  0, 100, 50,  nil)
+SectionHeader(Scroll, "AUTO DEFENSE (BUNDLED)",  0)
+Toggle(Scroll, "Enable Auto Defense",      "FeatureAlpha",   1)
+Toggle(Scroll, "Dash On Parry Cooldown",   "FeatureBeta",    2)
+Toggle(Scroll, "Deflect Block Fallback",   "FeatureGamma",   3)
+PlaceholderSlider(Scroll, "Deflect Hold Time (ms)", 4, 0, 500, cfg.DeflectHoldTime, "DeflectHoldTime", function()
+    applyBundledBridge()
+end)
 
-SectionHeader(Scroll, "CATEGORY  B",  10)
-Toggle(Scroll, "Feature Delta",   "FeatureDelta",   11)
-Toggle(Scroll, "Feature Epsilon", "FeatureEpsilon", 12)
-PlaceholderSlider(Scroll, "Speed Multiplier", 13, 1, 10, 5, nil)
-
-SectionHeader(Scroll, "CATEGORY  C",  20)
-Toggle(Scroll, "Feature Zeta",    "FeatureZeta",    21)
-Toggle(Scroll, "Feature Eta",     "FeatureEta",     22)
-PlaceholderSlider(Scroll, "Range",   23,  50, 500, 200, nil)
+SectionHeader(Scroll, "COMBAT ASSISTANCE (BUNDLED)",  10)
+Toggle(Scroll, "Allow Failure",            "FeatureDelta",   11)
+Toggle(Scroll, "Auto Timing Prompt",       "FeatureEpsilon", 12)
+Toggle(Scroll, "Aim Lock",                 "FeatureZeta",    13)
+Toggle(Scroll, "Enable Notifications",     "FeatureEta",     14)
 
 -- ── CONFIG TAB CONTENT ────────────────────────────────────────────────────────
 local function CfgSectionHeader(text, order)
@@ -1891,9 +1958,19 @@ UserInputService.InputBegan:Connect(function(i, gpe)
                 cfg[cfgKey] = newState
                 if pillRefreshers[cfgKey] then pillRefreshers[cfgKey](newState) end
                 Notify(cfgKey .. "  >>  " .. (newState and "ON" or "OFF"), newState)
+                applyBundledBridge()
                 break
             end
         end
+    end
+end)
+
+-- Keep bridge synced in case bundled recreates controls.
+task.spawn(function()
+    while _G.Kraken_Active do
+        pcall(applyBundledBridge)
+        pcall(hideBundledUiIfRequested)
+        task.wait(0.5)
     end
 end)
 
