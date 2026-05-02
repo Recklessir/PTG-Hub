@@ -47,6 +47,81 @@ if not shared then
 	return warn("No shared, no script.")
 end
 
+-- Optional PTG UI GitHub integration.
+-- Set before execution:
+-- _G.PTG_UI_RAW_URL = "https://raw.githubusercontent.com/<user>/<repo>/<branch>/PTG%20HUB.lua"
+-- _G.PTG_UI_AUTOLOAD = true
+local function loadPtgUiFromGitHub()
+	local enabled = (_G and _G.PTG_UI_AUTOLOAD) ~= false
+	if not enabled then
+		return
+	end
+
+	local rawUrl = _G and _G.PTG_UI_RAW_URL
+	if type(rawUrl) ~= "string" or rawUrl == "" then
+		return
+	end
+
+	-- Avoid duplicate UI load across re-executions.
+	if shared.PTG_UI_LOADED_FROM_GITHUB then
+		return
+	end
+
+	local okFetch, source = pcall(function()
+		if syn and syn.request then
+			local res = syn.request({ Url = rawUrl, Method = "GET" })
+			if not res or tonumber(res.StatusCode) ~= 200 then
+				error("http status " .. tostring(res and res.StatusCode))
+			end
+			return res.Body
+		end
+
+		if http and http.request then
+			local res = http.request({ Url = rawUrl, Method = "GET" })
+			if not res or tonumber(res.StatusCode) ~= 200 then
+				error("http status " .. tostring(res and res.StatusCode))
+			end
+			return res.Body
+		end
+
+		return game:HttpGet(rawUrl, true)
+	end)
+
+	if not okFetch or type(source) ~= "string" or source == "" then
+		return warn("[Lycoris/PTG] UI fetch failed:", tostring(source))
+	end
+
+	local loader = loadstring or load
+	if type(loader) ~= "function" then
+		return warn("[Lycoris/PTG] loadstring/load unavailable; cannot load PTG UI")
+	end
+
+	local chunk, compileErr = loader(source)
+	if not chunk then
+		return warn("[Lycoris/PTG] UI compile failed:", tostring(compileErr))
+	end
+
+	local previousInsideFlag = _G and _G.PTG_RUNNING_INSIDE_BUNDLED
+	local previousAutoLoadBundled = _G and _G.PTG_AUTO_LOAD_BUNDLED
+	if _G then
+		_G.PTG_RUNNING_INSIDE_BUNDLED = true
+		_G.PTG_AUTO_LOAD_BUNDLED = false
+	end
+
+	local okRun, runErr = pcall(chunk)
+	if _G then
+		_G.PTG_RUNNING_INSIDE_BUNDLED = previousInsideFlag
+		_G.PTG_AUTO_LOAD_BUNDLED = previousAutoLoadBundled
+	end
+	if not okRun then
+		return warn("[Lycoris/PTG] UI runtime failed:", tostring(runErr))
+	end
+
+	shared.PTG_UI_LOADED_FROM_GITHUB = true
+end
+
+pcall(loadPtgUiFromGitHub)
+
 -- Initialize Luraph globals if they do not exist.
 loadstring("getfenv().LPH_NO_VIRTUALIZE = function(...) return ... end")()
 
